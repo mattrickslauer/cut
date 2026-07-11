@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cut! — Audition Room</title>
+  <link rel="stylesheet" href="audition.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="clap">🎬</span>
+      <h1>Cut!<span class="sub">Audition Room — read with your AI scene partner</span></h1>
+    </div>
+    <div class="session">
+      <span id="recDot" class="rec-dot off"></span>
+      <span id="sessionTime" class="mono">00:00</span>
+    </div>
+  </header>
+
+  <main class="room">
+    <!-- LEFT: scene setup + controls -->
+    <section class="panel setup">
+      <div class="panel-label">SCENE</div>
+      <label class="field">
+        <span>Sides</span>
+        <select id="sceneSel"></select>
+      </label>
+      <div id="sceneCard" class="scene-card">
+        <div class="scene-row"><b>You play</b><span id="humanChar">—</span></div>
+        <div class="scene-row"><b>Reading with</b><span id="aiChar">—</span></div>
+        <p id="scenePremise" class="premise">—</p>
+        <p class="opening">Opening line (their character): <em id="sceneOpening">—</em></p>
+      </div>
+
+      <div class="controls">
+        <button id="startBtn" class="primary">Start audition</button>
+        <button id="lineBtn" class="line" disabled>🎙 Deliver your line</button>
+        <button id="newTakeBtn" class="ghost" disabled>↺ New take</button>
+        <button id="saveBtn" class="ghost" disabled>⬇ Save take</button>
+      </div>
+      <p id="status" class="status">Pick your sides and press <b>Start audition</b>.</p>
+      <p class="hint mono">Reader is scale-to-zero on Alibaba FC — first line warms it; the rest are instant.</p>
+    </section>
+
+    <!-- CENTER: the scene / dialogue -->
+    <section class="panel scene">
+      <div class="panel-label">THE SCENE <span id="takeTag" class="tag">take 1</span></div>
+      <div id="dialogue" class="dialogue"></div>
+      <div id="subtitle" class="subtitle"></div>
+    </section>
+
+    <!-- RIGHT: the "tune" half — AI reader's coaching notes -->
+    <section class="panel notes">
+      <div class="panel-label">READER'S NOTES <span class="tag cut">tune</span></div>
+      <div class="stakes-wrap">
+        <span class="mono">stakes</span>
+        <div class="stakes"><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div id="notesList" class="notes-list">
+        <p class="muted">Notes on your delivery appear here after each line — pace, choices, listening, stakes.</p>
+      </div>
+    </section>
+  </main>
+
+  <audio id="player" hidden></audio>
+  <script src="audition.js"></script>
+</body>
+</html>
