@@ -1,0 +1,39 @@
+edition: 3.0.0
+name: cut-backend
+access: default
+
+vars:
+  region: ap-southeast-1
+
+resources:
+  perceive:
+    component: fc3
+    props:
+      region: ${vars.region}
+      functionName: cut-perceive
+      description: "Cut! perception service — qwen3-vl-flash director's eye"
+      runtime: custom.debian10
+      code: ./code
+      handler: index.handler          # unused by custom runtime; required field
+      cpu: 0.5
+      memorySize: 512
+      diskSize: 512
+      timeout: 60
+      instanceConcurrency: 5
+      environmentVariables:
+        QWEN_API_KEY: ${env('QWEN_API_KEY')}   # injected from shell at deploy; never committed
+        PERCEPTION_MODEL: qwen3-vl-flash
+      customRuntimeConfig:
+        command:
+          - python3
+          - app.py
+        port: 9000
+      triggers:
+        - triggerName: httpTrigger
+          triggerType: http
+          triggerConfig:
+            authType: anonymous
+            methods:
+              - GET
+              - POST
+              - OPTIONS

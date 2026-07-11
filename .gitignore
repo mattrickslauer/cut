@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
+venv/
+*.egg-info/
+
+# Render outputs / recordings (ephemeral — belong in object storage, not git)
+*.mp4
+*.webm
+*.wav
+*.mov
+out/
+renders/
+.data/
+
+# Node
+node_modules/
+dist/
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+*.log

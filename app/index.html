@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cut! — Director Control Panel</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="clap">🎬</span>
+      <h1>Cut!<span class="sub">Director Control Panel</span></h1>
+    </div>
+    <div class="session">
+      <span id="recDot" class="rec-dot off"></span>
+      <span id="sessionTime" class="mono">00:00</span>
+    </div>
+  </header>
+
+  <main class="stage">
+    <!-- RAW CAMERA -->
+    <section class="pane">
+      <div class="pane-label">CAMERA <span class="tag">raw</span></div>
+      <div class="video-wrap">
+        <video id="cam" playsinline autoplay muted></video>
+        <div id="camPlaceholder" class="placeholder">
+          <p>Camera off</p>
+          <button id="startBtn" class="primary">Start camera</button>
+        </div>
+      </div>
+      <div class="pane-foot mono">
+        <span id="rawRes">—</span> · <span id="rawFps">0</span> fps
+      </div>
+    </section>
+
+    <!-- DIRECTOR'S CUT -->
+    <section class="pane">
+      <div class="pane-label">DIRECTOR'S CUT <span class="tag cut">preview</span></div>
+      <div class="video-wrap cut">
+        <canvas id="cut"></canvas>
+        <div class="letterbox top"></div>
+        <div id="subtitle" class="subtitle"></div>
+        <div class="letterbox bottom"></div>
+      </div>
+      <div class="pane-foot mono">
+        <span id="gradeName">Neutral</span> · <span id="cutFps">0</span> fps
+      </div>
+    </section>
+  </main>
+
+  <!-- CONTROL BAR -->
+  <div class="controls">
+    <div class="group">
+      <label>Camera</label>
+      <select id="deviceSel"></select>
+    </div>
+    <div class="group">
+      <label>Look</label>
+      <div id="grades" class="chips"></div>
+    </div>
+    <div class="group">
+      <label>World</label>
+      <select id="bgSel"></select>
+      <input id="worldPrompt" type="text" placeholder="describe a world…" />
+      <button id="genWorld" class="ghost">Generate ✨</button>
+    </div>
+    <div class="group grow"></div>
+    <div class="group">
+      <button id="snapBtn" class="ghost" disabled>Snapshot</button>
+      <button id="toggleBtn" class="primary" disabled>Start session</button>
+    </div>
+  </div>
+
+  <!-- SIDE: DIRECTOR STATE + LOG -->
+  <aside class="side">
+    <div class="card">
+      <h2>Director state</h2>
+      <dl class="kv">
+        <dt>Scene</dt><dd id="stScene">—</dd>
+        <dt>Mood</dt><dd id="stMood">—</dd>
+        <dt>Shot</dt><dd id="stShot">—</dd>
+      </dl>
+      <div id="cast" class="cast"></div>
+    </div>
+    <div class="card grow">
+      <h2>Transcript</h2>
+      <div id="transcript" class="transcript"></div>
+    </div>
+    <div class="card grow">
+      <h2>Director's log</h2>
+      <div id="log" class="log"></div>
+    </div>
+  </aside>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
