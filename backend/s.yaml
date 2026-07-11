@@ -11,22 +11,18 @@ resources:
     props:
       region: ${vars.region}
       functionName: cut-perceive
-      description: "Cut! perception + audition co-star — qwen3-vl-flash eye, qwen-max reader, qwen-tts voice"
+      description: "Cut! perception service — qwen3-vl-flash director's eye"
       runtime: custom.debian10
       code: ./code
       handler: index.handler          # unused by custom runtime; required field
       cpu: 0.5
       memorySize: 512
       diskSize: 512
-      timeout: 60                     # /costar does ASR + reply + TTS sequentially; stays well under
+      timeout: 60
       instanceConcurrency: 5
       environmentVariables:
         QWEN_API_KEY: ${env('QWEN_API_KEY')}   # injected from shell at deploy; never committed
         PERCEPTION_MODEL: qwen3-vl-flash
-        ASR_MODEL: qwen3-asr-flash             # actor's line -> text (see research/asr.md)
-        COSTAR_MODEL: qwen-max                 # in-character scene-partner reply + coaching note
-        TTS_MODEL: qwen-tts                    # voices the reader's line (verify id/voices vs Model Studio)
-        TTS_VOICE: Cherry                      # default; each scene overrides per character
       customRuntimeConfig:
         command:
           - python3

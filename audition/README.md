@@ -5,19 +5,26 @@ sides, deliver your line, and the AI scene partner answers in character — then
 casting-savvy note on your delivery. Record → get notes → re-take → save. The actor-facing
 wedge of Cut!: a daily-habit recorder whose reader-that-reacts is the reason to use it.
 
-## Architecture — turn-based on scale-to-zero Alibaba FC
-
-The whole reader runs on the **same scale-to-zero Function Compute web function** as the
-director (`backend/code/app.py`, stdlib-only, holds the DashScope key). No new infra, no
-GPU box, no persistent socket.
+Self-contained subfolder — its own scale-to-zero FC function, web app, and docs. Touches
+none of the director's files.
 
 ```
-Browser (audition.html)
+audition/
+  server/   app.py    # cut-audition FC function (stdlib-only, holds the DashScope key)
+            s.yaml     # its own scale-to-zero FC resource
+  web/      index.html audition.css audition.js   # the recorder UI
+  README.md
+```
+
+## Architecture — turn-based on scale-to-zero Alibaba FC
+
+```
+Browser (web/index.html)
   ── pick sides ──▶ scene config
   ── deliver line ─▶ Web Audio capture → 16 kHz mono WAV → base64
         │  POST /costar  { scene, history, audio }
         ▼
-  Alibaba Function Compute  (cut-perceive, custom.debian10, scale-to-zero)
+  Alibaba Function Compute  (cut-audition, custom.debian10, scale-to-zero)
         ├─ qwen3-asr-flash   actor's line → text (+ emotion)      [DashScope, HTTP one-shot]
         ├─ qwen-max          in-character reply + coaching note   [DashScope, HTTP one-shot]
         └─ qwen-tts          voice the reply → audio data URI     [DashScope, HTTP one-shot]
@@ -43,16 +50,20 @@ path — only if acting timing proves it's needed.
 ## Run it
 
 ```bash
-# backend (same function as the director)
-cd backend/code
+# backend (its own function)
+cd audition/server
 QWEN_API_KEY=sk-xxx PORT=8787 python3 app.py
-# then point BACKEND_URL in app/audition.js at http://localhost:8787 and open app/audition.html
 
-# deploy (adds nothing new — same function gains /costar + /warm routes)
-cd backend && QWEN_API_KEY=sk-xxx s deploy
+# frontend: BACKEND_URL in web/audition.js already points at http://localhost:8787
+# open audition/web/index.html   (e.g.  python3 -m http.server -d audition/web 5500)
+
+# deploy (independent scale-to-zero function)
+cd audition/server && QWEN_API_KEY=sk-xxx s deploy
+# then set BACKEND_URL in web/audition.js to the printed cut-audition URL
 ```
 
-## Endpoints (added to the existing function)
+## Endpoints
+- `GET  /health` — liveness + which models are wired
 - `GET  /warm`   — no-op that spins a cold instance up before an audition
 - `POST /costar` — `{ audio: dataURI, scene: {...}, history: [...] }` → `{ heard, line, note, stakes, audio }`
 
@@ -64,8 +75,8 @@ cd backend && QWEN_API_KEY=sk-xxx s deploy
 2. **Reader model** — `qwen-max` is the default; `qwen3-max` also fine (set `COSTAR_MODEL`).
 
 ## Next wire-ups
-- **Save to OSS** — `saveBtn` currently downloads the take (webm + transcript). Add an FC
-  `/sign` route (`oss2` signed PUT) so takes live in the cloud and become the self-tape casting
+- **Save to OSS** — `saveBtn` currently downloads the take (webm + transcript). Add a `/sign`
+  route (`oss2` signed PUT) so takes live in the cloud and become the self-tape casting
   reviews. This is the seed of the B2B side.
 - **Per-minute metering** — stamp active talk-time per session for billing (the model discussed).
 - **Webcam** — add `getUserMedia({video})` + record video alongside audio for a real self-tape.

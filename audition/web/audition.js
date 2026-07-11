@@ -2,8 +2,10 @@
 // Loop per beat: capture your line (Web Audio -> 16kHz mono WAV) -> POST /costar
 // -> {heard, line, note, stakes, audio} -> render + speak. One POST = one acting beat.
 
-// Same Alibaba Function Compute reader the director panel uses (holds the DashScope key).
-const BACKEND_URL = 'https://cut-perceive-xfdwmitvbk.ap-southeast-1.fcapp.run';
+// The cut-audition Function Compute reader (scale-to-zero, holds the DashScope key).
+// Set this to the URL printed by `s deploy` in audition/server/ — e.g.
+// https://cut-audition-XXXX.ap-southeast-1.fcapp.run  — or http://localhost:8787 to run locally.
+const BACKEND_URL = 'http://localhost:8787';
 const ASR_RATE = 16000;          // qwen3-asr-flash wants 16 kHz mono (see research/asr.md)
 const SILENCE_MS = 1200;         // auto-end your line after this much trailing silence
 const MAX_LINE_MS = 20000;       // hard cap on a single delivered line
