@@ -3,6 +3,11 @@
 /out
 /build
 next-env.d.ts
-.env*.local
+
+# Secrets — ignore every .env variant, but keep the committed template
+.env
+.env.*
+!.env.example
+
 *.tsbuildinfo
 .DS_Store

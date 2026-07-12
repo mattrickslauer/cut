@@ -17,9 +17,15 @@ renders/
 # Node
 node_modules/
 dist/
+
+# Secrets — ignore every .env variant, but keep the committed template
 .env
-.env.local
+.env.*
+!.env.example
 
 # OS / editor
 .DS_Store
 *.log
+
+# Claude Code session data / worktrees — never publish
+.claude/
