@@ -5,7 +5,9 @@
 //
 // State machine:  LISTENING → HEARING(you talk) → THINKING(POST /costar) → SPEAKING(reply) → LISTENING
 
-const BACKEND_URL = 'http://localhost:8787';   // cut-audition FC function (or local server)
+// Deployed cut-audition FC function (scale-to-zero, ap-southeast-1). For local dev,
+// swap to 'http://localhost:8787' and run audition/server/app.py.
+const BACKEND_URL = 'https://cut-audition-htjhmbyvbv.ap-southeast-1.fcapp.run';
 const ASR_RATE = 16000;        // qwen3-asr-flash wants 16 kHz mono (see research/asr.md)
 const START_RMS = 0.028;       // onset threshold (enter HEARING)
 const END_RMS   = 0.016;       // below this counts as silence (hysteresis vs START)

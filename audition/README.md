@@ -57,19 +57,18 @@ path — only if acting timing proves it's needed.
   per-turn once warm. Hidden behind `GET /warm`, fired on "Start audition".
 - COGS tracks the per-minute meter exactly: nothing runs when no one's rehearsing.
 
-## Run it
+## Deployed (Alibaba Function Compute, ap-southeast-1, scale-to-zero)
+
+**Live:** `https://cut-audition-htjhmbyvbv.ap-southeast-1.fcapp.run` — `web/audition.js`
+`BACKEND_URL` points here. In-region it runs ~2.5–3s/turn (co-located with DashScope).
 
 ```bash
-# backend (its own function)
-cd audition/server
-QWEN_API_KEY=sk-xxx PORT=8787 python3 app.py
-
-# frontend: BACKEND_URL in web/audition.js already points at http://localhost:8787
-# open audition/web/index.html   (e.g.  python3 -m http.server -d audition/web 5500)
-
-# deploy (independent scale-to-zero function)
+# redeploy after backend changes (injects the DashScope key at deploy; never committed)
 cd audition/server && QWEN_API_KEY=sk-xxx s deploy
-# then set BACKEND_URL in web/audition.js to the printed cut-audition URL
+
+# local dev instead: run the server and point BACKEND_URL at it
+cd audition/server && QWEN_API_KEY=sk-xxx PORT=8787 python3 app.py   # BACKEND_URL=http://localhost:8787
+# serve the UI:  python3 -m http.server -d audition/web 5500  → open http://localhost:5500
 ```
 
 ## Endpoints
