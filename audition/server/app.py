@@ -332,9 +332,12 @@ def oss_host(raw, content_type, ext, ttl=7200):
     key = OSS_PREFIX + hashlib.sha1(raw).hexdigest() + "." + ext
     host = f"{OSS_BUCKET}.{OSS_ENDPOINT}"
     date = formatdate(usegmt=True)
+    # NB: keep the string-to-sign in its own variable — a backslash inside an f-string
+    # expression is a SyntaxError before Python 3.12 (the FC custom runtime is older).
+    put_sts = f"PUT\n\n{content_type}\n{date}\n/{OSS_BUCKET}/{key}"
     put = urllib.request.Request(
         f"https://{host}/{key}", data=raw, method="PUT",
-        headers={"Authorization": f"OSS {OSS_KEY_ID}:{_oss_sign(f'PUT\n\n{content_type}\n{date}\n/{OSS_BUCKET}/{key}')}",
+        headers={"Authorization": f"OSS {OSS_KEY_ID}:{_oss_sign(put_sts)}",
                  "Date": date, "Content-Type": content_type, "Host": host})
     with urllib.request.urlopen(put, timeout=60) as r:
         r.read()

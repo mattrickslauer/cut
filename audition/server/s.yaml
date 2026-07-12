@@ -37,9 +37,9 @@ resources:
         # OSS hosts each line's WAV so wan2.7-i2v can fetch it (driving_audio must be a public url).
         # Create a bucket in your DashScope region and a RAM user with oss PutObject/GetObject.
         OSS_ENDPOINT: oss-ap-southeast-1.aliyuncs.com   # match your DashScope/Model Studio region
-        OSS_BUCKET: ${env('OSS_BUCKET')}       # e.g. cut-audition-audio (leave unset to disable talking-head)
-        OSS_KEY_ID: ${env('OSS_KEY_ID')}       # RAM AccessKey id
-        OSS_KEY_SECRET: ${env('OSS_KEY_SECRET')}  # RAM AccessKey secret; never committed
+        OSS_BUCKET: ${env('OSS_BUCKET', '')}       # e.g. cut-audition-audio (leave unset to disable talking-head)
+        OSS_KEY_ID: ${env('OSS_KEY_ID', '')}       # RAM AccessKey id
+        OSS_KEY_SECRET: ${env('OSS_KEY_SECRET', '')}  # RAM AccessKey secret; never committed
       customRuntimeConfig:
         command:
           - python3
