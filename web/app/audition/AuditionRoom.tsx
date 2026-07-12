@@ -146,6 +146,30 @@ export default function AuditionRoom() {
               placeholder="Paste the sides — the co-star follows its lines. Leave blank to improvise from the premise."
             />
           </label>
+          {(view.canCompile || view.compiling || view.compiled) && (
+            <div className={styles.compileWrap}>
+              <button
+                className={`${styles.btn} ${styles.compile}`}
+                disabled={view.compiling || (!view.canCompile && !view.compiled)}
+                onClick={() => engineRef.current?.compile()}
+              >
+                {view.compiling
+                  ? `🎬 Compiling… ${view.compileProgress}/${view.compileTotal}`
+                  : view.compiled
+                    ? "✓ Compiled — recompile co-star"
+                    : "🎬 Compile talking-head co-star"}
+              </button>
+              {view.compiling && (
+                <div className={styles.compileBar}>
+                  <i style={{ width: `${(view.compileProgress / Math.max(1, view.compileTotal)) * 100}%` }} />
+                </div>
+              )}
+              <p className={`${styles.hint} ${styles.mono}`} style={{ marginTop: 6 }}>
+                Pre-renders each co-star line as a lip-synced clip (~1–5 min per line). Optional —
+                skip it to rehearse with just the voice.
+              </p>
+            </div>
+          )}
           <div className={styles.controls}>
             <button
               className={`${styles.btn} ${styles.primary}`}

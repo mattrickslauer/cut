@@ -65,6 +65,12 @@ export type AuditionView = {
   currentLine: number;
   linePrompt: string | null;
   scripted: boolean;
+  // talking-head compile status
+  canCompile: boolean;
+  compiling: boolean;
+  compiled: boolean;
+  compileProgress: number;
+  compileTotal: number;
 };
 
 export function initialView(): AuditionView {
@@ -90,6 +96,11 @@ export function initialView(): AuditionView {
     currentLine: -1,
     linePrompt: null,
     scripted: false,
+    canCompile: false,
+    compiling: false,
+    compiled: false,
+    compileProgress: 0,
+    compileTotal: 0,
   };
 }
 
@@ -148,6 +159,15 @@ export class AuditionEngine {
   private ptr = 0; // index of the NEXT line to perform (co-star) or hear (actor)
   private scripted = false; // set at take start when there are parsed lines
   private tries = 0; // failed line-match attempts on the current actor line
+  // compiled talking-head co-star: a portrait + one lip-synced clip per co-star line, pre-rendered
+  // so the co-star performs as a real face (played into the canvas, mixed into the take), instantly.
+  private portrait: string | null = null;
+  private clips = new Map<number, string>(); // parsed-line index → video data URI
+  private compiled = false;
+  private compiling = false;
+  private clipActive = false; // drawFrame paints the talking-head clip instead of the text card
+  private costarVideo!: HTMLVideoElement; // reusable element the clips play through
+  private costarSrc: MediaElementAudioSourceNode | null = null; // its audio, routed into the mix
 
   constructor(opts: {
     cam: HTMLVideoElement;
@@ -163,6 +183,10 @@ export class AuditionEngine {
     this.meterFill = opts.meterFill;
     this.scene = opts.scene;
     this.onChange = opts.onChange;
+    this.costarVideo = document.createElement("video"); // off-DOM; drawn to canvas, audio via graph
+    this.costarVideo.playsInline = true;
+    this.costarVideo.preload = "auto";
+    this.costarVideo.crossOrigin = "anonymous";
   }
 
   // ---- view plumbing ----
@@ -192,13 +216,22 @@ export class AuditionEngine {
     this.parsed = this.currentScript()
       ? parseScript(this.script, this.scene.ai_character, this.scene.human_character)
       : [];
-    if (this.state === "idle")
+    if (this.state === "idle") {
+      // editing the sides (or switching scene) invalidates any compiled talking-head clips
+      this.compiled = false;
+      this.clips.clear();
+      this.portrait = null;
       this.patch({
         scriptLines: this.parsed.map((l) => ({ i: l.i, who: l.who, speaker: l.speaker, text: l.text })),
         currentLine: -1,
         scripted: false,
         linePrompt: null,
+        compiled: false,
+        canCompile: this.parsed.some((l) => l.who === "costar") && !this.compiling,
+        compileProgress: 0,
+        compileTotal: 0,
       });
+    }
   }
   // The actor's next expected scripted line, or "" when it's not the actor's turn / no script.
   private expectedActorLine(): string {
@@ -216,6 +249,9 @@ export class AuditionEngine {
     this.playerSrc = this.audioCtx.createMediaElementSource(this.player);
     this.playerSrc.connect(this.mixDest); // reader voice → recording
     this.playerSrc.connect(this.audioCtx.destination); // reader voice → speakers
+    this.costarSrc = this.audioCtx.createMediaElementSource(this.costarVideo);
+    this.costarSrc.connect(this.mixDest); // talking-head clip voice → recording
+    this.costarSrc.connect(this.audioCtx.destination); // → speakers
   }
 
   // ---- director's-cut compositor ----
@@ -260,7 +296,16 @@ export class AuditionEngine {
     const W = 1280,
       H = 720,
       bar = 54;
-    if (this.state === "speaking") {
+    if (this.state === "speaking" && this.clipActive && this.costarVideo.videoWidth) {
+      // compiled talking-head: the co-star is a real (lip-synced) face in the two-shot
+      c.fillStyle = "#000";
+      c.fillRect(0, 0, W, H);
+      this.coverDraw(c, this.costarVideo, W, H);
+      c.textAlign = "center";
+      c.fillStyle = "#ffb056";
+      c.font = "600 24px system-ui,sans-serif";
+      c.fillText((this.costarShot.who || "").toUpperCase(), W / 2, H - bar - 16);
+    } else if (this.state === "speaking") {
       const g = c.createLinearGradient(0, 0, W, H);
       g.addColorStop(0, "#1c1420");
       g.addColorStop(1, "#08080f");
@@ -389,6 +434,11 @@ export class AuditionEngine {
       this.beatTimer = null;
     }
     this.player.onended = null;
+    try {
+      this.costarVideo.onended = null;
+      this.costarVideo.pause();
+    } catch {}
+    this.clipActive = false;
   }
 
   // stop the audition, then play back the take you just recorded
@@ -533,10 +583,13 @@ export class AuditionEngine {
     if (line.who === "costar") {
       this.addTurn("costar", this.scene.ai_character, line.text);
       this.history.push({ who: "costar", text: line.text });
-      this.say(this.scene.ai_character, line.text, undefined, () => {
+      const advance = () => {
         this.setPtr(this.ptr + 1);
         this.stepScript();
-      });
+      };
+      const clip = this.clips.get(line.i);
+      if (this.compiled && clip) this.playClip(this.scene.ai_character, line.text, clip, advance);
+      else this.say(this.scene.ai_character, line.text, undefined, advance); // fall back to voice-only
     } else {
       this.tries = 0;
       this.resumeListening(); // your line — deliver it; we advance once you have
@@ -606,6 +659,93 @@ export class AuditionEngine {
       .then((r) => r.json())
       .then((d) => d && d.audio && new Audio(d.audio).play().catch(() => {}))
       .catch(() => {});
+  }
+
+  // ---- compile: pre-render the co-star as a talking-head (portrait + a lip-synced clip per line) ----
+  async compile() {
+    if (this.compiling) return;
+    this.reparse();
+    const lines = this.parsed.filter((l) => l.who === "costar");
+    if (!lines.length) return this.patch({ pillOverride: "No co-star lines in the script to compile" });
+    this.compiling = true;
+    this.compiled = false;
+    this.clips.clear();
+    this.patch({
+      canCompile: false,
+      compiling: true,
+      compiled: false,
+      compileProgress: 0,
+      compileTotal: lines.length,
+      pillOverride: "Compiling scene partner — generating the co-star's face…",
+    });
+    try {
+      const portrait = await this.postJson("/portrait", {
+        character: this.scene.ai_character,
+        tone: this.scene.tone,
+      });
+      if (!portrait.image) throw new Error(portrait.error || "portrait failed");
+      this.portrait = portrait.image;
+      let done = 0;
+      for (const l of lines) {
+        this.patch({ pillOverride: `Filming the co-star… line ${done + 1} of ${lines.length}` });
+        const said = await this.postJson("/say", { text: l.text, voice: this.scene.voice, tone: this.scene.tone });
+        if (!said.audio) throw new Error(said.error || "voice failed");
+        const sub = await this.postJson("/avatar", { image: this.portrait, audio: said.audio });
+        if (!sub.task_id) throw new Error(sub.error || "avatar submit failed");
+        this.clips.set(l.i, await this.pollAvatar(sub.task_id));
+        this.patch({ compileProgress: ++done });
+      }
+      this.compiled = true;
+      this.patch({ compiling: false, compiled: true, pillOverride: `Scene partner ready — ${done} shots. Press Start.` });
+    } catch (e) {
+      this.patch({ compiling: false, pillOverride: "Compile failed: " + (e as Error).message });
+    } finally {
+      this.compiling = false;
+      this.patch({ canCompile: this.parsed.some((l) => l.who === "costar") && !this.compiled });
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private postJson(path: string, body: unknown): Promise<any> {
+    return fetch(BACKEND_URL + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => r.json());
+  }
+
+  // Poll a talking-head task until the mp4 lands (video is minutes-scale). Best-effort, ~15 min cap.
+  private async pollAvatar(taskId: string): Promise<string> {
+    for (let i = 0; i < 60; i++) {
+      await new Promise((res) => setTimeout(res, 15000));
+      const s = await fetch(`${BACKEND_URL}/avatar?task_id=${encodeURIComponent(taskId)}`).then((r) => r.json());
+      if (s.status === "SUCCEEDED" && s.video) return s.video as string;
+      if (s.error) throw new Error(s.error);
+    }
+    throw new Error("avatar timed out");
+  }
+
+  // Play a pre-rendered talking-head clip as the co-star's turn: painted into the canvas by
+  // drawFrame, its audio already routed into the recording. Hands the turn back when it ends.
+  private playClip(who: string, line: string, src: string, after: () => void) {
+    const gen = this.gen;
+    const whoShort = who.split(",")[0];
+    this.patch({ subtitle: line, whoSpoke: whoShort });
+    this.costarShot = { who: whoShort, line };
+    this.setState("speaking");
+    const cue: Cue | null = this.recordStart
+      ? { t: (performance.now() - this.recordStart) / 1000, end: 0, text: line, who: whoShort }
+      : null;
+    if (cue) this.cues.push(cue);
+    this.clipActive = true;
+    const finish = () => {
+      this.clipActive = false;
+      if (cue) cue.end = (performance.now() - this.recordStart) / 1000;
+      if (gen === this.gen) after();
+    };
+    this.costarVideo.src = src;
+    this.costarVideo.onended = finish;
+    this.costarVideo.play().catch(finish);
   }
 
   private onAudio = (e: AudioProcessingEvent) => {

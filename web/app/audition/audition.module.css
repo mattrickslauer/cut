@@ -566,3 +566,31 @@
   font-weight: 600;
   line-height: 1.35;
 }
+
+/* compile — pre-render the talking-head co-star */
+.compileWrap {
+  margin-top: 12px;
+}
+.compile {
+  width: 100%;
+  background: linear-gradient(180deg, rgba(255, 176, 86, 0.16), rgba(255, 176, 86, 0.06));
+  color: var(--ember-2);
+  border: 1px solid rgba(255, 176, 86, 0.4);
+  font-weight: 600;
+}
+.compile:not(:disabled):hover {
+  background: rgba(255, 176, 86, 0.2);
+}
+.compileBar {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.compileBar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--ember), var(--ember-2));
+  transition: width 0.4s ease;
+}
