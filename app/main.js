@@ -132,7 +132,16 @@ async function startCamera(deviceId) {
   try {
     stopTracks();
     const constraints = {
-      audio: true,   // for continuous transcription
+      // Continuous transcription. Let the browser's WebRTC DSP scrub steady
+      // background noise (fans, traffic, room tone) before it ever reaches the
+      // VAD, so only the actor's voice survives to the ASR. The adaptive
+      // noise-floor gate in startAudio() catches what this misses (chatter,
+      // music). See NOISE_* below.
+      audio: {
+        noiseSuppression: true,
+        echoCancellation: true,
+        autoGainControl: true,
+      },
       video: deviceId
         ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
         : { width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -485,7 +494,13 @@ function renderCast() {
 // ---------- continuous transcription (qwen3-asr-flash via Alibaba FC) ----------
 // VAD endpointing: flush the moment the speaker pauses → low latency + clean word boundaries.
 const VAD_START = 0.012, VAD_END = 0.008, VAD_SILENCE_MS = 380, VAD_MIN_MS = 400, VAD_MAX_MS = 5000;
-let vadSilenceMs = 0, vadChunkMs = 0, vadHadSpeech = false;
+// Adaptive noise gate: keep the speech bar a fixed ratio above the room's ambient
+// level so steady background (fans, traffic, chatter, music) never trips the VAD —
+// only the actor's voice, which rises well above the floor, is sent to the ASR.
+// The floor is a min-follower (slow up, fast down) so it settles on room tone even
+// mid-line. VAD_START/VAD_END stay as minimum bars so a quiet room behaves as before.
+const NOISE_ON_SNR = 2.5, NOISE_OFF_SNR = 1.6, NOISE_FLOOR_UP = 0.05, NOISE_FLOOR_DOWN = 0.3;
+let vadSilenceMs = 0, vadChunkMs = 0, vadHadSpeech = false, vadNoiseFloor = VAD_START;
 
 function startAudio(stream) {
   const track = stream.getAudioTracks()[0];
@@ -496,17 +511,23 @@ function startAudio(stream) {
     state.audioCtx = ctx; state.srcRate = ctx.sampleRate;
     const source = ctx.createMediaStreamSource(stream);
     const proc = ctx.createScriptProcessor(4096, 1, 1);
-    vadSilenceMs = 0; vadChunkMs = 0; vadHadSpeech = false;
+    vadSilenceMs = 0; vadChunkMs = 0; vadHadSpeech = false; vadNoiseFloor = VAD_START;
     proc.onaudioprocess = (e) => {
       const ch = e.inputBuffer.getChannelData(0);
       let s = 0; for (let i = 0; i < ch.length; i += 2) s += ch[i] * ch[i];
       const rms = Math.sqrt(s / (ch.length / 2));
       const blockMs = (ch.length / state.srcRate) * 1000;
+      // track ambient floor every block (min-follower: slow up, fast down) so it
+      // settles on room tone even mid-line
+      vadNoiseFloor += (rms - vadNoiseFloor) * (rms > vadNoiseFloor ? NOISE_FLOOR_UP : NOISE_FLOOR_DOWN);
+      // speech bar rides a fixed ratio above that floor (never below the fixed min)
+      const onThresh = Math.max(VAD_START, vadNoiseFloor * NOISE_ON_SNR);
+      const offThresh = Math.max(VAD_END, vadNoiseFloor * NOISE_OFF_SNR);
       state.pcmChunks.push(new Float32Array(ch));
       state.pcmLen += ch.length;
       vadChunkMs += blockMs;
-      if (rms > VAD_START) { vadHadSpeech = true; vadSilenceMs = 0; }
-      else if (vadHadSpeech && rms < VAD_END) { vadSilenceMs += blockMs; }
+      if (rms > onThresh) { vadHadSpeech = true; vadSilenceMs = 0; }
+      else if (vadHadSpeech && rms < offThresh) { vadSilenceMs += blockMs; }
       // drop leading dead air so a chunk starts near the first word
       if (!vadHadSpeech && vadChunkMs > 700) {
         const last = state.pcmChunks[state.pcmChunks.length - 1];
