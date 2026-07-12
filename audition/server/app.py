@@ -17,6 +17,9 @@ server-side. Deploys independently of the director's cut-perceive function.
   POST /say     -> { text, voice?, emotion?, instructions?, tone? } -> { audio } : voice
                    arbitrary text (the opening line, a "Line!" prompt), expressively — pass
                    an emotion word or an explicit delivery instruction. Whole scene spoken.
+  POST /portrait-> { character, tone? } -> { image, image_url } : a head-and-shoulders
+                   portrait of the co-star (qwen-image), framed for talking-head animation.
+                   First half of the scripted "compile" pass (avatar video is the second).
 
 WHY TURN-BASED HTTP (not a streaming WebSocket): a scale-to-zero FC function can't hold a
 persistent socket without breaking scale-to-zero. A scene partner delivers *lines* with
@@ -27,11 +30,16 @@ not lag. Cold start only hits the first POST after idle — hidden behind GET /w
 Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
-import os, json, base64, urllib.request, urllib.error
+import os, json, base64, time, urllib.request, urllib.error
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DASHSCOPE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+# Text-to-image (async submit + poll) — used to generate the co-star's portrait for the
+# talking-head "compile" pass. Same endpoint the perception service uses for backgrounds.
+IMG_SUBMIT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+TASK_POLL = "https://dashscope-intl.aliyuncs.com/api/v1/tasks/"
+PORTRAIT_MODEL = os.environ.get("PORTRAIT_MODEL", "qwen-image")
 # qwen-tts lives on the native multimodal-generation endpoint (synchronous, returns an audio URL).
 # Flash and instruct-flash share this endpoint and response shape; instruct-flash additionally
 # reads input.instructions for expressive delivery. (Verified against Model Studio qwen-tts docs.)
@@ -208,6 +216,57 @@ def synthesize(text, voice=None, emotion=None, instruction=None, tone=None):
     return _tts_call(TTS_MODEL, text, voice)
 
 
+def _submit_and_poll(url, body, tries=40, interval=1.5, timeout=30):
+    """Submit an async DashScope task (X-DashScope-Async) and poll /tasks/{id} until it
+    SUCCEEDS, returning the whole output object. Shared by portrait + (later) avatar video."""
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json",
+                 "X-DashScope-Async": "enable"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        task_id = json.loads(r.read().decode())["output"]["task_id"]
+    for _ in range(tries):
+        time.sleep(interval)
+        preq = urllib.request.Request(TASK_POLL + task_id,
+                                      headers={"Authorization": f"Bearer {API_KEY}"})
+        with urllib.request.urlopen(preq, timeout=timeout) as r:
+            out = json.loads(r.read().decode())["output"]
+        st = out.get("task_status")
+        if st == "SUCCEEDED":
+            return out
+        if st == "FAILED":
+            raise RuntimeError("task failed: " + json.dumps(out)[:200])
+    raise TimeoutError("task timed out: " + task_id)
+
+
+def _rehost(url, timeout=60):
+    """Inline an OSS result URL as a same-origin data URI (OSS urls expire in 24h + send no CORS)."""
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        raw, ctype = r.read(), r.headers.get("Content-Type", "application/octet-stream")
+    return "data:%s;base64,%s" % (ctype, base64.b64encode(raw).decode())
+
+
+def generate_portrait(character, tone=None):
+    """A head-and-shoulders portrait of the co-star, framed for talking-head animation (front
+    view, plain background, mouth closed). Returns the inlined image plus the source OSS url —
+    some avatar models want a public url rather than base64."""
+    desc = (character or "a person").split(",")
+    who = desc[0].strip() or "a person"
+    detail = ", ".join(d.strip() for d in desc[1:]).strip()
+    prompt = (
+        f"Cinematic head-and-shoulders portrait photograph of {who}"
+        + (f" — {detail}" if detail else "")
+        + ". Front view, looking straight at camera, neutral plain studio background, soft key "
+        "light, natural skin texture, photographic, shallow depth of field, single person, "
+        "centered, head and shoulders in frame, mouth closed, calm neutral expression"
+        + (f". Mood: {tone}." if tone else ".")
+    )
+    out = _submit_and_poll(IMG_SUBMIT, {"model": PORTRAIT_MODEL, "input": {"prompt": prompt},
+                                        "parameters": {"size": "1024*1024", "n": 1}})
+    url = out["results"][0]["url"]
+    return {"image": _rehost(url), "image_url": url}
+
+
 def costar(scene, history, audio_data_url=None, text=None):
     """One audition beat: hear the actor -> reply in character -> voice it.
     `text` skips ASR entirely (the browser already transcribed the line) — the fast path."""
@@ -255,7 +314,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        if path not in ("/costar", "/say"):
+        if path not in ("/costar", "/say", "/portrait"):
             return self._json(404, {"error": "not found"})
         if not API_KEY:
             return self._json(500, {"error": "QWEN_API_KEY not configured"})
@@ -272,6 +331,10 @@ class Handler(BaseHTTPRequestHandler):
                     req["text"], req.get("voice"),
                     emotion=req.get("emotion"), instruction=req.get("instructions"),
                     tone=req.get("tone"))})
+            if path == "/portrait":                        # co-star's face for the talking-head compile
+                if not req.get("character"):
+                    return self._json(400, {"error": "missing 'character'"})
+                return self._json(200, generate_portrait(req["character"], req.get("tone")))
             if not req.get("audio") and not req.get("text"):
                 return self._json(400, {"error": "missing 'audio' or 'text'"})
             if not req.get("scene"):
