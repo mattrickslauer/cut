@@ -45,7 +45,7 @@ const SCENES = [
 const el = id => document.getElementById(id);
 const $ = {
   sceneSel:el('sceneSel'), humanChar:el('humanChar'), aiChar:el('aiChar'),
-  premise:el('scenePremise'), opening:el('sceneOpening'),
+  premise:el('scenePremise'), opening:el('sceneOpening'), scriptBox:el('scriptBox'),
   startBtn:el('startBtn'), stopBtn:el('stopBtn'), newTakeBtn:el('newTakeBtn'), saveBtn:el('saveBtn'),
   cam:el('cam'), camOff:el('camOff'), pill:el('pill'), meterFill:el('meterFill'),
   subtitle:el('subtitle'), whoSpoke:el('whoSpoke'), dialogue:el('dialogue'),
@@ -61,6 +61,7 @@ const S = {
   recorder:null, chunks:[], sessionStart:0, timer:0,
   cues:[], recordStart:0, playbackUrl:null,               // co-star caption cues for playback overlay
   mixDest:null, playerSrc:null,                           // Web Audio: mic + reader voice → recording
+  canvas:null, cctx:null, rafId:0, costarShot:{who:'',line:''},   // director's-cut compositor
 };
 
 // Persistent audio graph. Created once (createMediaElementSource can bind $.player only
@@ -75,11 +76,54 @@ function ensureAudioGraph(){
   S.playerSrc.connect(S.audioCtx.destination); // reader voice → speakers
 }
 
-// arm a fresh recorder (its own chunks array, so a stopped take can't leak into the next).
-// Records camera video + the MIXED audio (your mic + the reader's voice), not the raw mic.
+// ---- director's-cut compositor -----------------------------------------
+// We don't record the raw camera. We record a CANVAS that cuts between your shot
+// (camera, on your turns) and the co-star's shot (a card with their line, on their
+// turns), letterboxed. The recorder is paused during "thinking" (setState), so the
+// AI's latency never enters the video → a tight, coherent edited scene.
+function ensureCanvas(){
+  if (S.canvas) return;
+  S.canvas = document.createElement('canvas'); S.canvas.width = 1280; S.canvas.height = 720;
+  S.cctx = S.canvas.getContext('2d');
+}
+function coverDraw(c, v, W, H){
+  const vw=v.videoWidth, vh=v.videoHeight; if (!vw) return;
+  const s=Math.max(W/vw, H/vh), dw=vw*s, dh=vh*s;
+  c.drawImage(v, (W-dw)/2, (H-dh)/2, dw, dh);
+}
+function wrapText(c, text, x, y, maxW, lh){
+  const words=(text||'').split(' '); const lines=[]; let line='';
+  for (const w of words){ const t=line?line+' '+w:w; if (c.measureText(t).width>maxW && line){ lines.push(line); line=w; } else line=t; }
+  if (line) lines.push(line);
+  let yy = y - (lines.length-1)*lh/2;
+  for (const ln of lines){ c.fillText(ln, x, yy); yy+=lh; }
+}
+function drawFrame(){
+  S.rafId = requestAnimationFrame(drawFrame);
+  const c=S.cctx; if (!c) return;
+  const W=1280, H=720, bar=54;
+  if (S.state === 'speaking'){                       // cut to the co-star
+    const g=c.createLinearGradient(0,0,W,H); g.addColorStop(0,'#1c1420'); g.addColorStop(1,'#08080f');
+    c.fillStyle=g; c.fillRect(0,0,W,H);
+    c.textAlign='center';
+    c.fillStyle='#ffb056'; c.font='600 30px system-ui,sans-serif';
+    c.fillText((S.costarShot.who||'').toUpperCase(), W/2, H*0.30);
+    c.fillStyle='#eef0f6'; c.font='italic 42px Georgia,serif';
+    wrapText(c, S.costarShot.line||'', W/2, H*0.52, W*0.76, 58);
+  } else {                                           // your shot (camera)
+    c.fillStyle='#0b0b12'; c.fillRect(0,0,W,H);
+    if ($.cam.videoWidth) coverDraw(c, $.cam, W, H);
+  }
+  c.fillStyle='#000'; c.fillRect(0,0,W,bar); c.fillRect(0,H-bar,W,bar);   // letterbox
+}
+
+// arm a fresh recorder (own chunks array). Records the COMPOSITED canvas + mixed audio
+// (your mic + the reader's voice), so the tape is the edited two-shot with the voice in it.
 function armRecorder(){
-  const audio = S.mixDest ? S.mixDest.stream.getAudioTracks() : S.stream.getAudioTracks();
-  const recStream = new MediaStream([ ...S.stream.getVideoTracks(), ...audio ]);
+  ensureCanvas();
+  const cv = S.canvas.captureStream(30);
+  const audio = S.mixDest ? S.mixDest.stream.getAudioTracks() : (S.stream ? S.stream.getAudioTracks() : []);
+  const recStream = new MediaStream([ ...cv.getVideoTracks(), ...audio ]);
   const rec = new MediaRecorder(recStream, pickMime());
   const chunks = [];
   rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
@@ -112,6 +156,11 @@ function setState(st){
     speaking: ai + ' is speaking',
   })[st] || st;
   $.recDot.className = 'rec-dot ' + (st==='idle' ? 'off' : 'on');
+  // edit out the AI's latency: don't record the "thinking" gap into the tape
+  if (S.recorder){
+    if (st === 'thinking' && S.recorder.state === 'recording'){ try { S.recorder.pause(); } catch(_){} }
+    else if (st !== 'thinking' && S.recorder.state === 'paused'){ try { S.recorder.resume(); } catch(_){} }
+  }
 }
 
 // ---- start --------------------------------------------------------------
@@ -144,27 +193,20 @@ $.stopBtn.onclick = () => {
   stopSR();
   try { $.player.pause(); } catch(_){}
   clearInterval(S.timer);
+  cancelAnimationFrame(S.rafId); S.rafId = 0;              // stop compositing
   const finish = () => {                                   // runs once the recording is flushed
     try { S.node && S.node.disconnect(); S.source && S.source.disconnect(); } catch(_){}
     try { S.stream && S.stream.getTracks().forEach(t => t.stop()); } catch(_){}
     S.stream = S.node = S.source = null; S.state = 'idle';  // keep audioCtx/mixDest/playerSrc for next take
     $.subtitle.textContent = ''; $.whoSpoke.textContent = ''; $.meterFill.style.width = '0';
     $.recDot.className = 'rec-dot off';
-    if (S.chunks && S.chunks.length){                       // show playback of the take
+    if (S.chunks && S.chunks.length){                       // play back the director's cut
       if (S.playbackUrl) URL.revokeObjectURL(S.playbackUrl);
       S.playbackUrl = URL.createObjectURL(new Blob(S.chunks, { type:'video/webm' }));
       $.cam.style.display = 'none'; $.camOff.style.display = 'none';
-      $.playback.src = S.playbackUrl; $.playback.hidden = false;
-      $.pill.className = 'pill idle'; $.pill.innerHTML = '▶ Take ' + S.take + ' — playback';
-      const cues = S.cues.slice();                          // overlay the reader's lines, synced to the video
-      $.playback.ontimeupdate = () => {
-        const t = $.playback.currentTime; let cur = null;
-        for (const c of cues){ if (t >= c.t && t < c.end) cur = c; }
-        $.subtitle.textContent = cur ? cur.text : '';
-        $.whoSpoke.textContent = cur ? cur.who : '';
-      };
-      $.playback.onended = () => { $.subtitle.textContent=''; $.whoSpoke.textContent=''; };
-      $.playback.play().catch(()=>{});
+      $.playback.src = S.playbackUrl; $.playback.hidden = false; $.playback.ontimeupdate = null;
+      $.pill.className = 'pill idle'; $.pill.innerHTML = '▶ Take ' + S.take + ' — director’s cut';
+      $.playback.play().catch(()=>{});                      // the cut already has the shots, captions + voice baked in
       $.saveBtn.disabled = false;                           // let them keep the take
     } else {
       $.cam.srcObject = null; $.camOff.style.display = ''; setState('idle'); $.saveBtn.disabled = true;
@@ -182,17 +224,23 @@ function beginTake(first){
   $.takeTag.textContent = 'take ' + S.take;
   $.dialogue.innerHTML = ''; setStakes(0);
   $.notesList.innerHTML = '<p class="muted">Notes on your delivery appear here after each line.</p>';
-  // start a clean recording for this take (t=0), then the reader opens the scene
+  // start a clean recording for this take (t=0): composite canvas + mixed audio
+  ensureCanvas(); if (!S.rafId) S.rafId = requestAnimationFrame(drawFrame);
   try { S.recorder && S.recorder.state !== 'inactive' && S.recorder.stop(); } catch(_){}
   armRecorder(); S.cues = [];
   try { S.recorder.start(); } catch(_){}
   S.recordStart = performance.now();
-  addTurn('costar', S.scene.ai_character, S.scene.opening);              // reader opens; you respond
-  S.history.push({ who:'costar', text:S.scene.opening });
-  say(S.scene.ai_character, S.scene.opening);
   S.sessionStart = performance.now(); startTimer();
   resetCapture();
+  if (currentScript()){                                                 // scripted: you start from the sides
+    resumeListening();
+  } else {                                                              // improv: the reader opens
+    addTurn('costar', S.scene.ai_character, S.scene.opening);
+    S.history.push({ who:'costar', text:S.scene.opening });
+    say(S.scene.ai_character, S.scene.opening);
+  }
 }
+function currentScript(){ return ($.scriptBox.value || '').trim(); }
 $.newTakeBtn.onclick = () => { if (S.state==='thinking') return; beginTake(false); };
 
 // ---- turn detection -----------------------------------------------------
@@ -298,6 +346,7 @@ async function runTurn(extra){
 async function say(who, line, audioUri){
   $.subtitle.textContent = line;
   $.whoSpoke.textContent = who.split(',')[0];
+  S.costarShot = { who: who.split(',')[0], line };         // what the co-star's canvas shot shows
   setState('speaking');
   // timestamp this co-star line against the recording, for the playback overlay
   const cue = S.recordStart ? { t:(performance.now()-S.recordStart)/1000, end:0, text:line, who:who.split(',')[0] } : null;
@@ -322,7 +371,8 @@ function beat(line){ setTimeout(resumeListening, Math.min(4500, 900 + line.lengt
 
 function sceneForApi(){ const s=S.scene; return {
   ai_character:s.ai_character, human_character:s.human_character,
-  premise:s.premise, tone:s.tone, voice:s.voice, opening:s.opening, language:'en' }; }
+  premise:s.premise, tone:s.tone, voice:s.voice, opening:s.opening, language:'en',
+  script: currentScript() }; }
 
 // ---- rendering ----------------------------------------------------------
 function addTurn(kind, who, text, thinking){

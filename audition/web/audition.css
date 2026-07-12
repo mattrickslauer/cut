@@ -32,6 +32,9 @@ h1 .sub{font-size:12px;font-weight:400;color:var(--muted)}
 .field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
 .field span{font-size:12px;color:var(--muted)}
 select{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font-size:14px}
+.field em{color:var(--muted);font-style:normal;font-size:11px}
+textarea{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:13px/1.4 var(--mono);resize:vertical;min-height:52px}
+textarea:focus{outline:1px solid var(--ember-2)}
 .scene-card{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:13px}
 .scene-row{display:flex;justify-content:space-between;gap:10px;padding:3px 0}
 .scene-row b{color:var(--muted);font-weight:600}

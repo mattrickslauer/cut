@@ -53,12 +53,19 @@ camera/mic capture in Chrome and stalls, so it's **off by default**.)
 - Wins applied: `qwen-flash` (not `qwen-max`); replies kept short. (TTS returns base64 so the
   reader's voice can be mixed into the recording — costs a ~0.8s re-host, a deliberate trade.)
 
-### Recording — the reader's voice is in the tape
-A persistent Web Audio graph mixes your mic **and** the reader's TTS (via a
-`MediaElementSource` → `MediaStreamDestination`) into the recorded stream, so the Stop
-playback / Save-take file actually contains the spoken lines — not just mic bleed. The
-co-star's lines are also overlaid as captions, synced to the video. Voices are gender-matched
-per role (`qwen3-tts-flash`: Serena/Cherry female, Ethan/Elias male).
+### Director's cut — a coherent edited scene, latency removed
+We don't record the raw camera. We record a **composited canvas** that cuts between your
+shot (camera, on your turns) and the **co-star's shot** (a letterboxed card with their line,
+on their turns). The `MediaRecorder` is **paused during "thinking"**, so the AI's latency
+never enters the video — the Stop playback is a tight, edited two-shot with no dead air.
+A persistent Web Audio graph mixes your mic **and** the reader's TTS into the recorded audio,
+so the voice is baked into the tape (not mic bleed). Voices are gender-matched per role
+(`qwen3-tts-flash`, English prosody hint): Serena/Cherry female, Ethan/Elias male.
+
+### Scripts
+Paste sides into the **Script** box and the co-star follows them (`scene.script` → the reader's
+prompt delivers its character's next scripted line, adapting only to keep the scene alive). Blank
+= improvise from the premise. Scripted takes let you start (no canned opening).
 
 ### Why not a streaming WebSocket?
 `research/asr.md` already made this call: a scale-to-zero FC function can't hold a persistent

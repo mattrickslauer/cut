@@ -35,6 +35,7 @@ ASR_MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash")
 COSTAR_MODEL = os.environ.get("COSTAR_MODEL", "qwen-flash")  # fastest good reply (~1.5s vs qwen-max ~2.2s)
 TTS_MODEL = os.environ.get("TTS_MODEL", "qwen3-tts-flash")  # verified live on the intl Model Studio key
 TTS_VOICE = os.environ.get("TTS_VOICE", "Cherry")  # per-character voice overrides this
+TTS_LANG = os.environ.get("TTS_LANG", "English")   # nudge qwen3-tts-flash toward natural English prosody
 API_KEY = os.environ.get("QWEN_API_KEY", "").strip().strip('"').strip("'")
 
 
@@ -76,6 +77,10 @@ def costar_reply(scene, history, actor_line, actor_emotion=None):
         f"the character '{ai_char}'. The actor auditioning plays '{human_char}'. "
         f"SCENE: {scene.get('premise', 'an unscripted improv')}. "
         f"TONE: {scene.get('tone', 'natural, grounded')}. "
+        + (f"SCRIPT — follow it: deliver {ai_char}'s next line from this script, in order, staying on the "
+           f"written words as closely as a natural performance allows. If the actor drifts, bridge briefly "
+           f"and steer back to the script. SCRIPT:\n{(scene.get('script') or '').strip()[:2500]}\n "
+           if (scene.get('script') or '').strip() else "") +
         "Stay fully in character. Respond with ONE natural spoken line that reacts truthfully "
         "to what the actor just said and keeps the scene alive — never narrate, never break "
         "character, no stage directions inside the spoken line, no emojis. Match the scene's "
@@ -113,7 +118,7 @@ def synthesize(text, voice=None):
     OSS result URL sends no CORS headers, so the browser can't route it through Web Audio
     without tainting — and we need it in Web Audio to mix the voice into the recorded tape."""
     out = _post(TTS_SUBMIT, {"model": TTS_MODEL,
-                             "input": {"text": text, "voice": voice or TTS_VOICE},
+                             "input": {"text": text, "voice": voice or TTS_VOICE, "language_type": TTS_LANG},
                              "parameters": {}}).get("output", {})
     audio = out.get("audio", {}) or {}
     if audio.get("data"):                                  # inline base64 (some models)
