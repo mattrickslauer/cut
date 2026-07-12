@@ -26,7 +26,7 @@ resources:
         QWEN_API_KEY: ${env('QWEN_API_KEY')}   # injected from shell at deploy; never committed
         ASR_MODEL: qwen3-asr-flash             # actor's line -> text (see ../../research/asr.md)
         COSTAR_MODEL: qwen-max                 # in-character reply + coaching note
-        TTS_MODEL: qwen-tts                    # voices the reply (verify id/voices vs Model Studio)
+        TTS_MODEL: qwen3-tts-flash             # voices the reply (verified live on intl Model Studio)
         TTS_VOICE: Cherry                      # default; each scene overrides per character
       customRuntimeConfig:
         command:

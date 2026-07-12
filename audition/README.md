@@ -1,9 +1,11 @@
 # Cut! — Audition Room (AI scene partner)
 
 An **audition self-tape studio with an AI reader you act opposite in real time.** Pick your
-sides, deliver your line, and the AI scene partner answers in character — then gives you a
-casting-savvy note on your delivery. Record → get notes → re-take → save. The actor-facing
-wedge of Cut!: a daily-habit recorder whose reader-that-reacts is the reason to use it.
+sides, turn on your webcam, and just act — it's **hands-free**: continuous voice-activity
+detection hears when you speak, auto-ends your line on silence, and the scene partner
+answers in character (voiced) with a casting-savvy note on your delivery. No push-to-talk.
+Record → get notes → re-take → save. The actor-facing wedge of Cut!: a daily-habit
+self-tape recorder whose reader-that-reacts is the reason to use it.
 
 Self-contained subfolder — its own scale-to-zero FC function, web app, and docs. Touches
 none of the director's files.
@@ -27,7 +29,7 @@ Browser (web/index.html)
   Alibaba Function Compute  (cut-audition, custom.debian10, scale-to-zero)
         ├─ qwen3-asr-flash   actor's line → text (+ emotion)      [DashScope, HTTP one-shot]
         ├─ qwen-max          in-character reply + coaching note   [DashScope, HTTP one-shot]
-        └─ qwen-tts          voice the reply → audio data URI     [DashScope, HTTP one-shot]
+        └─ qwen3-tts-flash   voice the reply → audio data URI     [DashScope, HTTP one-shot]
         ▼
   { heard, line, note, stakes, audio }  → render, play, coach
 ```
@@ -67,12 +69,12 @@ cd audition/server && QWEN_API_KEY=sk-xxx s deploy
 - `GET  /warm`   — no-op that spins a cold instance up before an audition
 - `POST /costar` — `{ audio: dataURI, scene: {...}, history: [...] }` → `{ heard, line, note, stakes, audio }`
 
-## ⚠️ Verify before demo (built from docs, not a live call)
-1. **TTS** — confirm `qwen-tts` model id, endpoint (`.../multimodal-generation/generation`),
-   voice names (`Cherry`/`Ethan`/`Chelsie`/`Serena`…) and response shape (`output.audio.url`
-   vs `.data`) against Model Studio, exactly as `research/asr.md` verified ASR. Swap via the
-   `TTS_MODEL` / `TTS_VOICE` env vars — no code change.
-2. **Reader model** — `qwen-max` is the default; `qwen3-max` also fine (set `COSTAR_MODEL`).
+## Verified live (against the qwen-cloud intl Model Studio key)
+- ASR `qwen3-asr-flash`, reader `qwen-max`, and TTS **`qwen3-tts-flash`** all confirmed
+  working end-to-end via `POST /costar` — the reply comes back voiced (`output.audio.url`).
+- Note: `qwen-tts` / `cosyvoice-*` are **not** on this account ("Model not exist"); the flash
+  models are. All three are env-swappable (`ASR_MODEL`/`COSTAR_MODEL`/`TTS_MODEL`).
+- Voices (`Cherry`/`Ethan`/`Chelsie`/`Serena`, per-scene) are accepted by `qwen3-tts-flash`.
 
 ## Next wire-ups
 - **Save to OSS** — `saveBtn` currently downloads the take (webm + transcript). Add a `/sign`

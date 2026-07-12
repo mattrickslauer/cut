@@ -30,7 +30,7 @@ DASHSCOPE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/com
 TTS_SUBMIT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 ASR_MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash")
 COSTAR_MODEL = os.environ.get("COSTAR_MODEL", "qwen-max")
-TTS_MODEL = os.environ.get("TTS_MODEL", "qwen-tts")
+TTS_MODEL = os.environ.get("TTS_MODEL", "qwen3-tts-flash")  # verified live on the intl Model Studio key
 TTS_VOICE = os.environ.get("TTS_VOICE", "Cherry")  # per-character voice overrides this
 API_KEY = os.environ.get("QWEN_API_KEY", "").strip().strip('"').strip("'")
 
