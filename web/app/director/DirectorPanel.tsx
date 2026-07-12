@@ -168,7 +168,7 @@ export default function DirectorPanel() {
             disabled={view.genBusy}
             onClick={doGenerate}
           >
-            Generate ✨
+            {view.genBusy ? "Generating…" : "Generate ✨"}
           </button>
         </div>
         <div className={`${styles.group} ${styles.grow}`} />
