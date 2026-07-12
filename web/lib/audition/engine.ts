@@ -126,6 +126,12 @@ export class AuditionEngine {
   private cctx: CanvasRenderingContext2D | null = null;
   private rafId = 0;
   private costarShot: { who: string; line: string } = { who: "", line: "" };
+  // Cutting the take invalidates any reader response still in flight. Every async beat
+  // captures `gen` and bails if it no longer matches; stop()/beginTake() bump it, abort
+  // the pending fetch, and clear the pending timer so nothing plays or re-arms after Cut.
+  private gen = 0;
+  private inflight: AbortController | null = null;
+  private beatTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: {
     cam: HTMLVideoElement;
@@ -332,8 +338,25 @@ export class AuditionEngine {
     }
   }
 
+  // invalidate any reader response still in flight (thinking/speaking beat): bump the
+  // generation so late resolutions bail, abort the pending fetch, drop the pending timer,
+  // and unhook onended so finished playback can't re-arm the mic.
+  private cutPending() {
+    this.gen++;
+    try {
+      this.inflight?.abort();
+    } catch {}
+    this.inflight = null;
+    if (this.beatTimer) {
+      clearTimeout(this.beatTimer);
+      this.beatTimer = null;
+    }
+    this.player.onended = null;
+  }
+
   // stop the audition, then play back the take you just recorded
   stop() {
+    this.cutPending(); // drop any reader response still in flight — nothing speaks after Cut
     try {
       this.player.pause();
     } catch {}
@@ -385,6 +408,7 @@ export class AuditionEngine {
   }
 
   private beginTake(first: boolean) {
+    this.cutPending(); // a fresh take invalidates any reader beat left over from the last one
     try {
       this.player.pause();
     } catch {}
@@ -490,15 +514,20 @@ export class AuditionEngine {
 
   // ---- one beat: POST /costar → render → reader speaks → resume ----
   private async runTurn(extra: { audio?: string; text?: string }) {
+    const gen = this.gen;
     this.setState("thinking");
     const thinkingId = this.addTurn("costar", this.scene.ai_character, "…", true);
+    const ac = new AbortController();
+    this.inflight = ac;
     try {
       const r = await fetch(BACKEND_URL + "/costar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(Object.assign({ scene: this.sceneForApi(), history: this.history }, extra)),
+        signal: ac.signal,
       });
       const data = await r.json();
+      if (gen !== this.gen) return this.removeTurn(thinkingId); // cut while thinking — drop it
       if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
       this.removeTurn(thinkingId);
       const heard = (data.heard && data.heard.text) || extra.text || "(unclear)";
@@ -510,14 +539,18 @@ export class AuditionEngine {
       if (data.stakes) this.setStakes(data.stakes);
       this.say(this.scene.ai_character, data.line, data.audio);
     } catch (e) {
+      if (gen !== this.gen) return this.removeTurn(thinkingId); // aborted by Cut — stay quiet
       this.removeTurn(thinkingId);
       this.patch({ pillKind: "idle", pillOverride: "Reader error: " + (e as Error).message });
-      setTimeout(() => this.resumeListening(), 1400);
+      this.beatTimer = setTimeout(() => {
+        if (gen === this.gen) this.resumeListening();
+      }, 1400);
     }
   }
 
   // speak a co-star line, then hand the turn back
   private async say(who: string, line: string, audioUri?: string) {
+    const gen = this.gen;
     const whoShort = who.split(",")[0];
     this.patch({ subtitle: line, whoSpoke: whoShort });
     this.costarShot = { who: whoShort, line };
@@ -533,11 +566,14 @@ export class AuditionEngine {
       if (cue) cue.end = (performance.now() - this.recordStart) / 1000;
     };
     if (!audioUri) {
+      const ac = new AbortController();
+      this.inflight = ac;
       try {
         const r = await fetch(BACKEND_URL + "/say", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: line, voice: this.scene.voice }),
+          signal: ac.signal,
         });
         const d = await r.json();
         if (r.ok && d.audio) audioUri = d.audio;
@@ -545,17 +581,20 @@ export class AuditionEngine {
         /* fall through to a timed beat */
       }
     }
+    if (gen !== this.gen) return; // cut while generating/speaking — don't play, don't re-arm
     if (audioUri) {
       this.player.src = audioUri;
       this.player.onended = () => {
         done();
-        this.resumeListening();
+        if (gen === this.gen) this.resumeListening();
       };
-      this.player.play().catch(() => this.beat(line));
-    } else this.beat(line);
+      this.player.play().catch(() => this.beat(line, gen));
+    } else this.beat(line, gen);
   }
-  private beat(line: string) {
-    setTimeout(() => this.resumeListening(), Math.min(4500, 900 + line.length * 45));
+  private beat(line: string, gen: number) {
+    this.beatTimer = setTimeout(() => {
+      if (gen === this.gen) this.resumeListening();
+    }, Math.min(4500, 900 + line.length * 45));
   }
 
   private sceneForApi() {
@@ -644,6 +683,7 @@ export class AuditionEngine {
 
   // ---- teardown ----
   dispose() {
+    this.cutPending();
     try {
       if (this.timer) clearInterval(this.timer);
       cancelAnimationFrame(this.rafId);
