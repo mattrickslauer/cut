@@ -207,10 +207,17 @@ export default function AuditionRoom() {
             >
               ⬇ Save take
             </button>
+            <button
+              className={`${styles.btn} ${styles.ghost} ${styles.reset}`}
+              onClick={() => engineRef.current?.reset()}
+            >
+              ⟲ Reset — start over
+            </button>
           </div>
           <p className={`${styles.hint} ${styles.mono}`}>
             Once you start, just act — it hears when you finish and replies. If it misses your
-            ending, press <b>Space</b> or tap the video to send. Camera previews on load.
+            ending, press <b>Space</b> or tap the video to send. In a script, say <b>&ldquo;Line!&rdquo;</b>
+            {" "}(on its own) or press <b>L</b> and the reader feeds you your line. Camera previews on load.
           </p>
         </section>
 
