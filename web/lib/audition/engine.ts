@@ -818,7 +818,7 @@ export class AuditionEngine {
     fetch(BACKEND_URL + "/say", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: line, voice: this.scene.voice, tone: "a soft, quick prompter whisper" }),
+      body: JSON.stringify({ text: line, voice: this.scene.voice, gender: this.scene.gender, character: this.scene.ai_character, script: this.currentScript(), tone: "a soft, quick prompter whisper" }),
     })
       .then((r) => r.json())
       .then((d) => d && d.audio && new Audio(d.audio).play().catch(() => {}))
@@ -863,7 +863,7 @@ export class AuditionEngine {
       let done = 0;
       for (const l of lines) {
         this.patch({ pillOverride: `Filming the co-star… line ${done + 1} of ${lines.length}` });
-        const said = await this.postJson("/say", { text: l.text, voice: this.scene.voice, tone: this.scene.tone });
+        const said = await this.postJson("/say", { text: l.text, voice: this.scene.voice, gender: this.scene.gender, character: this.scene.ai_character, script: this.currentScript(), tone: this.scene.tone });
         if (!said.audio) throw new Error(said.error || "voice failed");
         const sub = await this.postJson("/avatar", { image: this.portrait, audio: said.audio });
         if (!sub.task_id) throw new Error(sub.error || "avatar submit failed");
@@ -1056,7 +1056,7 @@ export class AuditionEngine {
         const r = await fetch(BACKEND_URL + "/say", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: line, voice: this.scene.voice, tone: this.scene.tone }),
+          body: JSON.stringify({ text: line, voice: this.scene.voice, gender: this.scene.gender, character: this.scene.ai_character, script: this.currentScript(), tone: this.scene.tone }),
           signal: ac.signal,
         });
         const d = await r.json();
@@ -1089,6 +1089,7 @@ export class AuditionEngine {
       premise: s.premise,
       tone: s.tone,
       voice: s.voice,
+      gender: s.gender, // male/female voice-match when `voice` isn't pinned (backend resolves)
       opening: s.opening,
       language: "en",
       script: this.currentScript(),

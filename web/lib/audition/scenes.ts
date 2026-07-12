@@ -27,6 +27,9 @@ export type Scene = {
   premise: string;
   tone: string;
   voice: string;
+  // The co-star's voice gender. Drives male/female TTS voice selection when `voice` isn't pinned
+  // (custom/improvised/generated scenes); the backend falls back to inferring it from the script.
+  gender?: "male" | "female";
   opening: string;
   // library extras (optional so hand-authored/blank scenes still type-check)
   film?: string; // source film, shown on the poster
@@ -37,7 +40,9 @@ export type Scene = {
   costar?: Costar; // pre-rendered talking-head, if one has been filmed for this scene
 };
 
-// Iconic film two-handers. The `voice` is a qwen3-tts-flash voice, gender-matched to the co-star.
+// Iconic film two-handers. The `voice` is a qwen3-tts-flash voice, gender-matched to the co-star;
+// `gender` records that match so custom/improvised/generated co-stars (which don't pin a `voice`)
+// still get a male/female voice — the backend falls back to inferring gender from the script.
 // `sides` use the inline "SPEAKER: line" format the parser understands; the co-star is whichever
 // speaker matches `ai_character`, you read the rest. Excerpts are kept short — audition sides, not
 // full scenes.
@@ -55,6 +60,7 @@ const LIBRARY: Scene[] = [
       "A therapist keeps repeating three words until his brilliant, armored patient finally lets them land. The quietest scene in the film and the one that breaks it open.",
     tone: "gentle, immovable, tears under the surface",
     voice: "Elias", // measured male
+    gender: "male",
     opening: "It's not your fault.",
     sides: `SEAN: It's not your fault.
 WILL: I know.
@@ -81,6 +87,7 @@ SEAN: It's not your fault.`,
       "A hotshot Navy lawyer pushes a decorated colonel on the witness stand — and the colonel, contemptuous and cornered, decides to give him exactly what he's asking for.",
     tone: "combustible, contemptuous, high-stakes",
     voice: "Ethan", // male
+    gender: "male",
     opening: "You want answers?",
     sides: `KAFFEE: I want the truth.
 JESSUP: You can't handle the truth.
@@ -103,6 +110,7 @@ JESSUP: You're goddamn right I did.`,
       "A new assistant smirks at a debate over two identical belts. Her editor, without raising her voice, dismantles her — and the smirk — one sentence at a time.",
     tone: "icy, precise, quietly devastating",
     voice: "Serena", // mature female
+    gender: "female",
     opening: "Something funny?",
     sides: `MIRANDA: Something funny?
 ANDY: No. No, no. Nothing's — it's just that both those belts look exactly the same to me.
@@ -125,6 +133,7 @@ MIRANDA: That's all.`,
       "A bar, a torrent of words, and a girlfriend who has finally had enough. She ends it in the time it takes him to finish a thought.",
     tone: "rapid-fire, wounded, done",
     voice: "Cherry", // bright female
+    gender: "female",
     opening: "Is this real?",
     sides: `ERICA: Is this real?
 MARK: You don't have to study.
@@ -149,6 +158,7 @@ ERICA: You are going to go through life thinking that girls don't like you becau
       "Years after she vanished from a train platform, she walks into his bar in the last place he'd have picked. He's had a few. He isn't ready to be kind about it.",
     tone: "bruised, sardonic, aching",
     voice: "Elias", // measured male
+    gender: "male",
     opening: "Of all the gin joints in all the towns in all the world, she walks into mine.",
     sides: `RICK: Of all the gin joints in all the towns in all the world, she walks into mine.
 ILSA: I wouldn't have come if I'd known you were here.
@@ -169,6 +179,7 @@ RICK: Here's looking at you, kid.`,
       "Not from a film — a pure improv two-hander. The AI plays a stranger who clearly knows something you do not. No sides; follow the scene wherever it goes.",
     tone: "natural, grounded, discovery",
     voice: "Elias", // measured male
+    gender: "male",
     opening: "You're early. That's either very good or very bad.",
   },
 ];

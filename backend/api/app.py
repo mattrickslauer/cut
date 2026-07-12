@@ -96,6 +96,11 @@ TTS_INSTRUCT_MODEL = os.environ.get("TTS_INSTRUCT_MODEL", "qwen3-tts-instruct-fl
 TTS_EXPRESSIVE = os.environ.get("TTS_EXPRESSIVE", "1").strip() not in ("0", "false", "no", "")
 TTS_VOICE = os.environ.get("TTS_VOICE", "Cherry")  # per-character voice overrides this
 TTS_LANG = os.environ.get("TTS_LANG", "English")   # nudge qwen3-tts-flash toward natural English prosody
+# Default male/female qwen3-tts voices for gender-matched co-stars. When a scene doesn't pin an
+# explicit `voice`, we pick one of these from the co-star's gender (given, or inferred from the
+# script). Both are qwen3-tts voices already exercised live in the scene library.
+MALE_VOICE = os.environ.get("MALE_VOICE", "Ethan").strip() or "Ethan"
+FEMALE_VOICE = os.environ.get("FEMALE_VOICE", "Cherry").strip() or "Cherry"
 API_KEY = os.environ.get("QWEN_API_KEY", "").strip().strip('"').strip("'")
 
 # Alibaba OSS — where a co-star line's TTS WAV is hosted so wan2.7-i2v can fetch it (it requires a
@@ -287,7 +292,70 @@ def _tts_call(model, text, voice, instruction=None):
     raise RuntimeError("tts returned no audio: " + json.dumps(out)[:200])
 
 
-def synthesize(text, voice=None, emotion=None, instruction=None, tone=None):
+# --- Gender-matched voice selection -----------------------------------------------------------
+# A co-star should be read by a voice that matches the character's gender. Priority (hybrid, per
+# the product decision):
+#   1. an explicit `voice` (a scene's hand-tuned choice — e.g. Elias vs Ethan) always wins;
+#   2. else an explicit `gender` -> the default male/female voice;
+#   3. else infer gender from the character (+ script) via qwen-flash, cached;
+#   4. else the neutral TTS_VOICE fallback.
+# So library scenes stay pixel-identical (they pin `voice`), while custom/improvised/generated
+# co-stars get a gender-matched voice instead of always defaulting to Cherry.
+_GENDER_CACHE = {}
+
+
+def infer_gender(character, script=None):
+    """Best-effort 'male' | 'female' | None for the co-star, using the reply model (qwen-flash).
+    Cached by character so we spend at most one tiny classification per distinct co-star."""
+    key = (character or "").strip().lower()
+    if not key:
+        return None
+    if key in _GENDER_CACHE:
+        return _GENDER_CACHE[key]
+    excerpt = (script or "")[:600]
+    prompt = (
+        "You are casting a voice actor. Classify the likely voice gender of this character. "
+        "Answer with exactly one word: male, female, or unknown.\n"
+        f"Character: {character}\n" + (f"Their lines:\n{excerpt}\n" if excerpt else "")
+    )
+    g = None
+    try:
+        body = _post(DASHSCOPE_URL, {
+            "model": COSTAR_MODEL, "max_tokens": 2, "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}]})
+        word = (body["choices"][0]["message"].get("content") or "").strip().lower()
+        g = "male" if word.startswith("m") else "female" if word.startswith("f") else None
+    except Exception:
+        g = None  # inference is best-effort; a hiccup just falls through to the neutral voice
+    _GENDER_CACHE[key] = g
+    return g
+
+
+def _voice_for_gender(gender):
+    g = (gender or "").strip().lower()
+    if g in ("male", "m", "man"):
+        return MALE_VOICE
+    if g in ("female", "f", "woman"):
+        return FEMALE_VOICE
+    return None
+
+
+def resolve_voice(voice=None, gender=None, character=None, script=None):
+    """Pick the qwen3-tts voice for a line — see the priority note above."""
+    if voice:
+        return voice
+    v = _voice_for_gender(gender)
+    if v:
+        return v
+    if character:
+        v = _voice_for_gender(infer_gender(character, script))
+        if v:
+            return v
+    return TTS_VOICE
+
+
+def synthesize(text, voice=None, emotion=None, instruction=None, tone=None,
+               gender=None, character=None, script=None):
     """Voice a line, in character. Returns a same-origin 'data:audio/...;base64,...' URI — we
     re-host the OSS bytes on purpose: the OSS URL sends no CORS headers, so the browser can't
     route it through Web Audio without tainting, and we need it mixable into the recorded tape.
@@ -296,6 +364,7 @@ def synthesize(text, voice=None, emotion=None, instruction=None, tone=None):
     label we translate into one) and TTS_EXPRESSIVE is on, voice it with the instruct model.
     If that model 4xx's (unavailable / bad param), fall back to plain qwen3-tts-flash so a line
     is never lost to a style hiccup."""
+    voice = resolve_voice(voice, gender, character, script)  # gender-match when no voice is pinned
     direction = instruction or (emotion_to_instruction(emotion, tone) if TTS_EXPRESSIVE else None)
     if direction and _INSTRUCT_OK[0]:
         try:
@@ -520,7 +589,9 @@ def costar(scene, history, audio_data_url=None, text=None, forced_line=None, pro
     if is_line_cue(heard.get("text", "")):
         fed = (prompt_line or "").strip() or suggest_line(scene, history)
         try:                                              # plain, unhurried prompter read
-            spoken = synthesize(fed, scene.get("voice") or TTS_VOICE)
+            spoken = synthesize(fed, scene.get("voice"),
+                                gender=scene.get("gender"), character=scene.get("ai_character"),
+                                script=scene.get("script"))
         except Exception as e:
             spoken = None
         return {"heard": heard, "prompt": True, "line": fed, "emotion": "neutral",
@@ -528,8 +599,10 @@ def costar(scene, history, audio_data_url=None, text=None, forced_line=None, pro
 
     reply = costar_reply(scene, history, heard.get("text", ""), heard.get("emotion"), forced_line)
     try:
-        spoken = synthesize(reply.get("line", ""), scene.get("voice") or TTS_VOICE,
-                            emotion=reply.get("emotion"), tone=scene.get("tone"))
+        spoken = synthesize(reply.get("line", ""), scene.get("voice"),
+                            emotion=reply.get("emotion"), tone=scene.get("tone"),
+                            gender=scene.get("gender"), character=scene.get("ai_character"),
+                            script=scene.get("script"))
     except Exception as e:                                 # never lose the line if TTS hiccups
         spoken, reply["_tts_error"] = None, str(e)[:200]
     return {"heard": heard, "line": reply.get("line", ""), "emotion": reply.get("emotion"),
@@ -628,6 +701,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "costar_model": COSTAR_MODEL, "tts_model": TTS_MODEL,
                                     "tts_instruct_model": TTS_INSTRUCT_MODEL,
                                     "expressive": TTS_EXPRESSIVE, "has_key": bool(API_KEY),
+                                    "male_voice": MALE_VOICE, "female_voice": FEMALE_VOICE,
                                     "avatar_model": AVATAR_MODEL, "oss": oss_enabled(),
                                     "perception_model": PERCEPTION_MODEL, "image_model": IMAGE_MODEL})
         self._json(404, {"error": "not found"})
@@ -658,7 +732,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"audio": synthesize(
                     req["text"], req.get("voice"),
                     emotion=req.get("emotion"), instruction=req.get("instructions"),
-                    tone=req.get("tone"))})
+                    tone=req.get("tone"), gender=req.get("gender"),
+                    character=req.get("character"), script=req.get("script"))})
             if path == "/portrait":                        # co-star's face for the talking-head compile
                 if not req.get("character"):
                     return self._json(400, {"error": "missing 'character'"})
