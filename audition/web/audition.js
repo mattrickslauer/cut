@@ -9,13 +9,15 @@
 // swap to 'http://localhost:8787' and run audition/server/app.py.
 const BACKEND_URL = 'https://cut-audition-htjhmbyvbv.ap-southeast-1.fcapp.run';
 const ASR_RATE = 16000;        // qwen3-asr-flash wants 16 kHz mono (see research/asr.md)
-const START_RMS = 0.028;       // onset threshold (enter HEARING)
-const END_RMS   = 0.016;       // below this counts as silence (hysteresis vs START)
+const START_RMS = 0.020;       // onset threshold (enter HEARING) — low enough for quiet mics
+const END_RMS   = 0.011;       // below this counts as silence (hysteresis vs START)
 const ONSET_BLK = 2;           // consecutive loud blocks before we believe it's speech
 const END_SILENCE_MS = 1200;   // trailing silence that ends your line (waits so a dramatic pause doesn't cut you off)
 const MIN_SPEECH_MS  = 400;    // ignore blips shorter than this
 const MAX_LINE_MS    = 20000;  // hard cap on one line
 const PREROLL = 5;             // blocks of audio kept before onset so the first word isn't clipped
+const MEDIA = { video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:'user' },
+                audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true } };
 
 const SCENES = [
   { id:'diner', title:'The Diner — drama',
@@ -77,7 +79,7 @@ function setState(st){
   $.pill.className = 'pill ' + st;
   $.pill.innerHTML = ({
     idle:'Press <b>Start audition</b>',
-    listening:'🎧 Your turn — just act',
+    listening:'🎧 Your turn — act (Space / tap when done)',
     hearing:'Hearing you…',
     thinking:'Reader responding…',
     speaking: ai + ' is speaking',
@@ -88,12 +90,12 @@ function setState(st){
 // ---- start --------------------------------------------------------------
 $.startBtn.onclick = async () => {
   try {
-    setState('idle'); $.pill.textContent = 'Starting camera…';
+    setState('idle'); $.pill.textContent = 'Starting…';
     fetch(BACKEND_URL + '/warm').catch(()=>{});           // hide FC cold start
-    S.stream = await navigator.mediaDevices.getUserMedia({
-      video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:'user' },
-      audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true } });
-    $.cam.srcObject = S.stream; $.camOff.style.display = 'none';
+    if (!S.stream){                                        // grab it now if the preview didn't already
+      S.stream = await navigator.mediaDevices.getUserMedia(MEDIA);
+      $.cam.srcObject = S.stream; $.camOff.style.display = 'none';
+    }
     S.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (S.audioCtx.state === 'suspended') await S.audioCtx.resume();
     S.srcRate = S.audioCtx.sampleRate;
@@ -148,12 +150,24 @@ $.newTakeBtn.onclick = () => { if (S.state==='thinking') return; beginTake(false
 // reply + TTS (~3s) instead of ASR + reply + TTS (~6s). Fallback: the energy-VAD below
 // uploads audio for server ASR (browsers without SpeechRecognition, e.g. Firefox).
 const SR_CLASS = window.SpeechRecognition || window.webkitSpeechRecognition;
-const USE_SR = !!SR_CLASS;
+// SpeechRecognition contends with the camera/mic capture in Chrome — it gets no audio and
+// stalls in "listening". Default OFF: use the reliable energy-VAD on our own mic stream,
+// with a manual "done" fallback. (Set true only if you drop the recorder/Web-Audio mic use.)
+const USE_SR = false;
 
 function resetCapture(){ S.buffer=[]; S.bufLen=0; S.onset=0; S.silenceMs=0; S.speechMs=0; S.lineMs=0; }
 
 // hand the scene back to the actor
-function resumeListening(){ setState('listening'); if (USE_SR) startSR(); }
+function resumeListening(){ resetCapture(); setState('listening'); if (USE_SR) startSR(); }
+
+// send the buffered line — called by auto-endpoint AND the manual "done" (space / tap video)
+function finishLine(){
+  if (S.state !== 'hearing') return;                     // only when you've actually started talking
+  const wav = encodeWav(flatten(S.buffer, S.bufLen), S.srcRate);
+  resetCapture();
+  runTurn({ audio: wav });
+}
+function manualDone(){ if (S.state === 'hearing') finishLine(); }
 
 function startSR(){
   if (!USE_SR || S.state !== 'listening') return;
@@ -198,9 +212,9 @@ function onAudio(e){
   }
   S.buffer.push(new Float32Array(blk)); S.bufLen += blk.length; S.lineMs += ms;
   if (rms < END_RMS) S.silenceMs += ms; else { S.silenceMs = 0; S.speechMs += ms; }
-  if ((S.speechMs >= MIN_SPEECH_MS && S.silenceMs >= END_SILENCE_MS) || S.lineMs >= MAX_LINE_MS){
-    if (S.speechMs < MIN_SPEECH_MS){ resetCapture(); resumeListening(); return; }
-    const wav = encodeWav(flatten(S.buffer, S.bufLen), S.srcRate); resetCapture(); runTurn({ audio: wav });
+  if (S.silenceMs >= END_SILENCE_MS || S.lineMs >= MAX_LINE_MS){
+    if (S.speechMs < MIN_SPEECH_MS){ resetCapture(); setState('listening'); return; }  // false trigger — keep listening
+    finishLine();
   }
 }
 
@@ -320,4 +334,20 @@ function encodeWav(float, srcRate){
   return 'data:audio/wav;base64,' + btoa(bin);
 }
 
+// ---- camera preview on load + manual "done" -----------------------------
+async function initCamera(){                 // show the webcam immediately — don't wait for Start
+  try {
+    S.stream = await navigator.mediaDevices.getUserMedia(MEDIA);
+    $.cam.srcObject = S.stream; $.camOff.style.display = 'none';
+  } catch(e){
+    const p = $.camOff.querySelector('p'); if (p) p.textContent = 'Camera blocked — allow it, then press Start';
+  }
+}
+// never get stuck if auto-detect misjudges: press Space or tap the video to end your line
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && (S.state === 'hearing' || S.state === 'listening')){ e.preventDefault(); manualDone(); }
+});
+document.querySelector('.video-wrap').addEventListener('click', manualDone);
+
 fillScenes();
+initCamera();

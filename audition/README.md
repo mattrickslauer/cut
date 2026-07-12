@@ -21,15 +21,16 @@ audition/
 ## Architecture — turn-based on scale-to-zero Alibaba FC
 
 ```
-Browser (web/index.html)  — hands-free: SpeechRecognition transcribes as you act
+Browser (web/index.html)  — hands-free; camera previews on page load
   ── pick sides ──▶ scene config
-  ── you speak ───▶ browser SpeechRecognition → text  (ready the instant you stop)
-        │  POST /costar  { scene, history, text }        ← fast path, no audio upload
-        ▼                (fallback: energy-VAD → 16 kHz WAV → { audio } → server ASR)
+  ── you speak ───▶ energy-VAD on our mic stream detects when you finish
+        │           (or press Space / tap the video to send now)
+        │  POST /costar  { scene, history, audio }   16 kHz mono WAV
+        ▼
   Alibaba Function Compute  (cut-audition, custom.debian10, scale-to-zero)
-        ├─ qwen3-asr-flash   only on the fallback audio path       [DashScope, HTTP one-shot]
-        ├─ qwen-flash        in-character reply + coaching note     [DashScope, HTTP one-shot]
-        └─ qwen3-tts-flash   voice the reply → OSS audio URL        [DashScope, HTTP one-shot]
+        ├─ qwen3-asr-flash   actor's line → text (+ emotion)         [DashScope, HTTP one-shot]
+        ├─ qwen-flash        in-character reply + coaching note       [DashScope, HTTP one-shot]
+        └─ qwen3-tts-flash   voice the reply → OSS audio URL          [DashScope, HTTP one-shot]
         ▼
   { heard, line, note, stakes, audio }  → render, play, coach
 ```
@@ -37,13 +38,17 @@ Browser (web/index.html)  — hands-free: SpeechRecognition transcribes as you a
 **One POST = one acting beat.** A scene partner delivers *lines* with natural beats, so
 turn-based HTTP is the right target — the pause reads as acting, not lag.
 
-### Latency (measured, this key)
-- **Fast text path** (browser transcribes → POST `text`): reply `qwen-flash` ~1.5s + TTS
-  `qwen3-tts-flash` ~1.7s ≈ **~3–4s** to a voiced reply. The audio fallback adds ASR ~2.8s.
-- Wins applied: browser STT removes the ASR upload; `qwen-flash` (not `qwen-max`); TTS
-  returns the **OSS URL** so the browser streams it (no server re-host); replies kept short.
-- Deployed on FC **in ap-southeast-1** (co-located with DashScope) the per-call cross-region
-  RTT paid when running locally disappears — expect faster than the local numbers.
+### Turn detection
+The reliable default is an **energy-VAD on our own getUserMedia mic stream** — it waits for a
+~1.2s natural pause, with **Space / tap-the-video** as a manual "done" so you're never stuck.
+(A browser-`SpeechRecognition` text fast-path exists behind `USE_SR`, but it contends with the
+camera/mic capture in Chrome and stalls, so it's **off by default**.)
+
+### Latency (measured on the deployed function)
+- Audio path in-region: ASR `qwen3-asr-flash` + reply `qwen-flash` + TTS `qwen3-tts-flash`
+  ≈ **~4s** to a voiced reply (co-located with DashScope; negligible cold start).
+- Wins applied: `qwen-flash` (not `qwen-max`); TTS returns the **OSS URL** so the browser
+  streams it (no server re-host); replies kept short.
 
 ### Why not a streaming WebSocket?
 `research/asr.md` already made this call: a scale-to-zero FC function can't hold a persistent
