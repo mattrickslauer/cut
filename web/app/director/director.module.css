@@ -178,7 +178,8 @@
   grid-area: ctrl;
   display: flex;
   align-items: center;
-  gap: 18px;
+  flex-wrap: wrap; /* never clip the bar — wrap to a second row on narrow widths */
+  gap: 10px 18px;
   padding: 12px 16px;
   background: var(--panel);
   border-top: 1px solid var(--line);
@@ -422,4 +423,51 @@
 }
 .subtitle .who.B {
   color: #3ec6ff;
+}
+
+/* ---- responsive ----
+   The default is a fixed-height, no-scroll two-column control room built for a wide screen.
+   Below ~1000px that clips (side-by-side camera+cut get tiny, the side rail is squeezed), so
+   we stack everything into one scrollable column and give the video panes a real 16:9 box. */
+@media (max-width: 1000px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto;
+    grid-template-areas:
+      "top"
+      "stage"
+      "ctrl"
+      "side";
+    height: auto;
+    min-height: 100vh;
+    overflow: auto;
+  }
+  .stage {
+    grid-template-columns: 1fr;
+  }
+  .pane .videoWrap {
+    flex: none;
+    aspect-ratio: 16 / 9;
+  }
+  .side {
+    padding: 0 14px 14px;
+  }
+  .card.grow {
+    min-height: 200px;
+  }
+}
+@media (max-width: 620px) {
+  .group.grow {
+    display: none;
+  }
+  .select,
+  .input {
+    flex: 1;
+    max-width: none;
+    width: auto;
+  }
+  .stage,
+  .controls {
+    padding: 12px;
+  }
 }

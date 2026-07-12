@@ -45,19 +45,18 @@ experience's **real-time media pipeline** (getUserMedia, an `AudioContext` energ
 carry a per-frame VAD loop, so the imperative engine is deliberately kept out of the render
 cycle and only pushes a view-model back to the component through an `onChange` callback.
 
-### Backends (unchanged)
+### Backend (one function)
 
-The frontend talks to the two existing **Alibaba Function Compute** services (scale-to-zero,
-each holding the DashScope/Qwen key). This app does **not** re-implement them — it points at
-their URLs:
+The frontend talks to a single **Alibaba Function Compute** service (scale-to-zero, holding the
+DashScope/Qwen key). This app does **not** re-implement it — it points at its URL (`lib/config.ts`,
+override with `NEXT_PUBLIC_API_URL`):
 
 | Backend | Source | Endpoints |
 | --- | --- | --- |
-| `cut-perceive` | `../backend/code/app.py` | `POST /perceive`, `POST /transcribe`, `GET /background` |
-| `cut-audition` | `../audition/server/app.py` | `POST /costar`, `POST /say`, `GET /warm` |
+| `cut-api` | `../backend/api/app.py` | perceive: `POST /perceive`, `POST /transcribe`, `GET /background` · audition: `POST /costar`, `POST /say`, `POST /portrait`, `POST|GET /avatar`, `GET /warm` |
 
-Both are CORS-open (`ACAO: *`), so the browser calls them directly. The heavy offline render
-pipeline in `../backend/render` is not part of this app.
+It's CORS-open (`ACAO: *`), so the browser calls it directly. Deploy with `cd ../backend/api && s deploy`.
+The heavy offline render pipeline in `../backend/render` is a separate GPU service, not part of this app.
 
 ## Develop
 

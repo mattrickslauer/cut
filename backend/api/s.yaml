@@ -1,41 +1,45 @@
 edition: 3.0.0
-name: cut-audition
+name: cut-api
 access: default
 
-# Self-contained co-star reader — its own scale-to-zero FC function, deploys
-# independently of the director (backend/s.yaml). Same region, same DashScope key.
+# ONE scale-to-zero FC function for the whole app: the Audition Room co-star reader AND the
+# Director's-eye perception service, merged from the old cut-audition + cut-perceive functions.
+# (The GPU render pipeline in ../render/ stays separate — it isn't a scale-to-zero function.)
 vars:
   region: ap-southeast-1
 
 resources:
-  costar:
+  api:
     component: fc3
     props:
       region: ${vars.region}
-      functionName: cut-audition
-      description: "Cut! Audition Room — qwen-max scene-partner reader + qwen-tts voice"
+      functionName: cut-api
+      description: "Cut! — unified backend: audition co-star reader + director's-eye perception"
       runtime: custom.debian10
       code: .                          # this folder (app.py, stdlib-only)
       handler: index.handler           # unused by custom runtime; required field
       cpu: 0.5
       memorySize: 512
       diskSize: 512
-      timeout: 60                      # /costar does ASR + reply + TTS sequentially; stays well under
+      timeout: 60                      # /costar (ASR+reply+TTS) and /perceive stay well under
       instanceConcurrency: 5
       environmentVariables:
         QWEN_API_KEY: ${env('QWEN_API_KEY')}   # injected from shell at deploy; never committed
+        # ---- director's eye (perception) ----
+        PERCEPTION_MODEL: qwen3-vl-flash       # reads a performance frame -> directorial call
+        IMAGE_MODEL: qwen-image                # /background empty-environment stills
+        # ---- audition co-star ----
         ASR_MODEL: qwen3-asr-flash             # actor's line -> text (see ../../research/asr.md)
         COSTAR_MODEL: qwen-flash               # fastest good reply (~1.5s); qwen-max/qwen-plus also fine
-        TTS_MODEL: qwen3-tts-flash             # plain fallback voice (no emotion control)
+        TTS_MODEL: qwen3-tts-flash             # fast natural voice (default path)
         TTS_INSTRUCT_MODEL: qwen3-tts-instruct-flash  # expressive: reads a delivery `instructions` string
         # TTS_EXPRESSIVE: "1"                  # set "0" to force the flat flash voice
         TTS_VOICE: Cherry                      # default; each scene overrides per character
-        # ---- talking-head "compile" (optional; only needed for the video co-star) ----
         PORTRAIT_MODEL: qwen-image             # co-star's face (/portrait)
+        # ---- talking-head "compile" (optional; only needed for the video co-star) ----
         AVATAR_MODEL: wan2.7-i2v-2026-04-25    # audio-driven lip-synced video (/avatar), intl endpoint
         # AVATAR_RES: 720P
         # OSS hosts each line's WAV so wan2.7-i2v can fetch it (driving_audio must be a public url).
-        # Create a bucket in your DashScope region and a RAM user with oss PutObject/GetObject.
         OSS_ENDPOINT: oss-ap-southeast-1.aliyuncs.com   # match your DashScope/Model Studio region
         OSS_BUCKET: ${env('OSS_BUCKET', '')}       # e.g. cut-audition-audio (leave unset to disable talking-head)
         OSS_KEY_ID: ${env('OSS_KEY_ID', '')}       # RAM AccessKey id

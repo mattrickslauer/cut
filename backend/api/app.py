@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-Cut! — Audition Room co-star reader (Alibaba Function Compute web function, scale-to-zero).
+Cut! — unified backend (Alibaba Function Compute web function, scale-to-zero).
 
-Self-contained: its own FC function (cut-audition), stdlib-only, holds the DashScope key
-server-side. Deploys independently of the director's cut-perceive function.
+ONE function (cut-api) serving the whole app: the Audition Room co-star reader AND the
+Director's-eye perception service, merged from the old cut-audition + cut-perceive functions.
+Stdlib-only, holds the DashScope key server-side. (The heavy GPU render pipeline in
+backend/render/ stays separate — it isn't a scale-to-zero function.)
+
+  Director:  GET /background  POST /perceive  POST /transcribe
+  Audition:  GET /warm  GET /avatar  POST /costar  POST /say  POST /portrait  POST /avatar
+  Shared:    GET /health
 
   GET  /health  -> liveness + config sanity
   GET  /warm    -> no-op that spins a cold instance up before an audition starts
@@ -35,7 +41,7 @@ not lag. Cold start only hits the first POST after idle — hidden behind GET /w
 Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
-import os, json, base64, time, hmac, hashlib, urllib.request, urllib.error
+import os, re, json, base64, time, hmac, hashlib, io, wave, urllib.request, urllib.error
 from email.utils import formatdate
 from urllib.parse import urlparse, parse_qs, quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -64,6 +70,24 @@ AVATAR_PROMPT = os.environ.get(
 TTS_SUBMIT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 ASR_MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash")
 COSTAR_MODEL = os.environ.get("COSTAR_MODEL", "qwen-flash")  # fastest good reply (~1.5s vs qwen-max ~2.2s)
+# --- Director's-eye perception (folded in from the old cut-perceive function) ---
+# qwen3-vl-flash reads a live performance frame and returns a directorial call; qwen-image paints
+# the empty environment still we composite the performers onto. Both share this one FC function now.
+PERCEPTION_MODEL = os.environ.get("PERCEPTION_MODEL", "qwen3-vl-flash")
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "qwen-image")  # /background environment stills (no people)
+PERCEIVE_SYSTEM = (
+    "You are the PERCEPTION + DIRECTOR module of Cut!, an AI film director watching a "
+    "live improv performance between two people in front of a camera. Given ONE video "
+    "frame, read the moment and make a decisive directorial call. Judge from facial "
+    "expression, body language, and gesture. Respond ONLY as compact json with keys: "
+    "speaker (A|B|both|none), emotion (one word), action (short phrase), "
+    "setting (the fictional location the improv implies, e.g. 'interrogation room'), "
+    "scene_change (boolean: true if this reads as a new scene/location), "
+    "suggested_shot (WIDE|MS|MCU|CU|OTS), "
+    "suggested_look (Neutral|Noir|Sci-Fi|Golden|Thriller — match the mood), "
+    "director_note (a vivid directing call, max 12 words). Be decisive, never hedge. "
+    "Convention: character A is the performer on the LEFT of frame, B is on the RIGHT."
+)
 TTS_MODEL = os.environ.get("TTS_MODEL", "qwen3-tts-flash")  # verified live on the intl Model Studio key
 # Expressive delivery: qwen3-tts-flash IGNORES style — only qwen3-tts-instruct-flash reads a
 # natural-language `instructions` string (no emotion enum; you describe the delivery in words).
@@ -84,47 +108,64 @@ OSS_KEY_SECRET = os.environ.get("OSS_KEY_SECRET", "").strip()
 OSS_PREFIX = os.environ.get("OSS_PREFIX", "cut-audition/")
 
 # One-word emotion labels (from the co-star reply model) → concrete vocal-delivery instructions.
-# The docs are explicit: describe pitch/pace/emphasis, not vague mood words. Unknown labels fall
-# through to a generic template and rely on optimize_instructions to expand them.
+# The docs are explicit: describe pitch/pace/emphasis, not vague mood words.
+#
+# DELIVERY NOTE: a scene partner has to sound like a person *talking*, not a narrator performing.
+# The instruct model + optimize_instructions tends to over-act and drag the tempo, which reads as
+# the voice "slowing down". So (a) we only take the expressive path for genuinely strong beats
+# (STRONG_EMOTIONS below) — everything else uses the fast, natural plain voice — and (b) every
+# instruction below keeps a brisk conversational tempo. We describe *colour* (pitch, emphasis,
+# edge) but never tell it to slow down; "slow/deliberate/unhurried" is what made it drag.
 EMOTION_DIRECTION = {
-    "angry": "Speak with sharp, forceful anger; raised volume, hard emphasis, fast clipped pace.",
+    "angry": "Speak with sharp, forceful anger; raised volume, hard emphasis, quick clipped delivery.",
     "furious": "Speak with explosive fury; loud, biting, rapid, barely controlled.",
-    "cold": "Speak in a flat, cold, detached tone; low pitch, minimal inflection, deliberate pace.",
-    "tender": "Speak softly and warmly, gentle and intimate, slow with a soft breathy tone.",
+    "cold": "Speak flat and cold, detached; low pitch, minimal inflection, even tempo.",
+    "tender": "Speak softly and warmly, gentle and intimate, a soft breathy edge, natural tempo.",
     "warm": "Speak warmly and openly, relaxed and kind, easy natural rhythm.",
-    "sad": "Speak with quiet sadness; low, heavy, slow, a slight tremble.",
-    "grief": "Speak through grief; broken, halting, barely holding it together.",
+    "sad": "Speak with quiet sadness; low, heavy, a slight tremble, but keep it conversational.",
+    "grief": "Speak through grief; unsteady, catching, barely holding it together, still moving forward.",
     "anxious": "Speak with nervous anxiety; slightly fast, uneven rhythm, tense higher pitch.",
     "afraid": "Speak with fear; hushed, unsteady, quick shallow breaths between words.",
     "nervous": "Speak nervously; hesitant, uneven, a little too fast.",
     "playful": "Speak in a light, teasing, playful tone with a bright bouncy rhythm and a smile in the voice.",
-    "flirty": "Speak with a teasing, flirtatious lilt; warm, unhurried, a smile in the voice.",
+    "flirty": "Speak with a teasing, flirtatious lilt; warm, a smile in the voice.",
     "excited": "Speak with bright excitement; energetic, quick, rising intonation.",
     "joyful": "Speak with open joy; warm, buoyant, lively pace.",
-    "desperate": "Speak with raw desperation; urgent, straining, pleading emphasis.",
+    "desperate": "Speak with raw desperation; urgent, straining, pleading emphasis, driving forward.",
     "pleading": "Speak pleadingly; soft but urgent, rising, imploring.",
     "sarcastic": "Speak with dry sarcasm; flat exaggerated emphasis, a knowing edge.",
-    "menacing": "Speak with quiet menace; low, slow, controlled, dangerous calm.",
-    "commanding": "Speak with hard authority; firm, measured, weighted emphasis.",
-    "defeated": "Speak defeated; low, drained, slow, without energy.",
+    "menacing": "Speak with quiet menace; low, controlled, dangerous calm, unhurried but tight.",
+    "commanding": "Speak with hard authority; firm, weighted emphasis, decisive.",
+    "defeated": "Speak defeated; low, drained, flat, but keep it moving.",
     "hopeful": "Speak with cautious hope; gentle warmth, gradually lifting.",
     "confused": "Speak with uncertainty; searching, uneven, trailing intonation.",
     "tense": "Speak with held tension; tight, controlled, clipped.",
     "neutral": "Speak naturally and conversationally, grounded and in character.",
 }
 
+# Only these beats earn the (slower, more theatrical, higher-latency) expressive instruct voice.
+# Everything else — neutral, warm, playful, hopeful, an unlabelled line — stays on the fast plain
+# voice so an ordinary exchange never sounds like it's dragging. This is the main lever against
+# "the voice slows down unnecessarily": most lines simply don't take the expressive path anymore.
+STRONG_EMOTIONS = {
+    "angry", "furious", "grief", "sad", "desperate", "pleading", "menacing",
+    "afraid", "cold", "commanding", "defeated", "tender",
+}
+# Appended to every expressive instruction: the instruct model drifts slow without this.
+PACE_GUARD = " Keep a natural, unrushed conversational tempo — do not drag or over-enunciate."
+
 
 def emotion_to_instruction(emotion, tone=None):
     """Turn a one-word emotion (+ optional scene tone) into a concrete delivery instruction.
-    Returns None when there's nothing to say, so callers stay on the plain (non-instruct) path."""
+    Returns None when the beat isn't strong enough to warrant the expressive voice, so callers
+    stay on the fast, natural plain path (which is most of the time — see STRONG_EMOTIONS)."""
     e = (emotion or "").strip().lower()
-    if not e or e == "neutral":
-        base = EMOTION_DIRECTION["neutral"] if tone else None
-    else:
-        base = EMOTION_DIRECTION.get(e) or f"Speak with a distinctly {e} tone, in character; let it color pitch, pace, and emphasis."
-    if base and tone:
+    if e not in STRONG_EMOTIONS:
+        return None
+    base = EMOTION_DIRECTION.get(e) or f"Speak with a distinctly {e} tone, in character; let it colour pitch and emphasis."
+    if tone:
         base += f" Overall register: {str(tone).strip()}."
-    return base
+    return base + PACE_GUARD
 
 
 def _post(url, payload, headers=None, timeout=30):
@@ -153,11 +194,16 @@ def transcribe(audio_data_url, language="en"):
     return {"text": (msg.get("content") or "").strip(), "emotion": emotion, "usage": body.get("usage", {})}
 
 
-def costar_reply(scene, history, actor_line, actor_emotion=None):
-    """The AI scene-partner's turn. Given the scene setup, the dialogue so far, and the
-    actor's just-delivered line (+ detected emotion), stay in character and return ONE
-    spoken line — plus a private coaching note on the delivery (the 'tune' half of the
-    product). qwen-max, json out, short reply for low latency."""
+def costar_reply(scene, history, actor_line, actor_emotion=None, forced_line=None):
+    """The AI scene-partner's turn. Given the scene setup, the FULL dialogue so far, and the
+    actor's just-delivered line (+ detected emotion), stay in character and return ONE spoken
+    line — plus a private coaching note on the delivery (the 'tune' half of the product).
+
+    `forced_line`: scripted mode. When set, the co-star must deliver exactly these words (the
+    writer's next line for the character) — we don't let the model paraphrase. The model then
+    only picks the delivery emotion and writes the coaching note on the actor's line. This is
+    what makes 'compile a scene from the sides' a real read-through, not an improv approximation.
+    """
     ai_char = scene.get("ai_character", "the scene partner")
     human_char = scene.get("human_character", "the actor")
     system = (
@@ -165,37 +211,47 @@ def costar_reply(scene, history, actor_line, actor_emotion=None):
         f"the character '{ai_char}'. The actor auditioning plays '{human_char}'. "
         f"SCENE: {scene.get('premise', 'an unscripted improv')}. "
         f"TONE: {scene.get('tone', 'natural, grounded')}. "
+        # Continuity is the whole point of a scene partner: earlier beats have to inform this one.
+        "You remember EVERYTHING that has happened in this scene so far — the full exchange is "
+        "below, in order. Let what was already said shape your reply: build on it, pay off earlier "
+        "moments, call back to specifics, and never contradict what you've established or reset the "
+        "scene as if the previous lines didn't happen. "
         + (f"SCRIPT — follow it: deliver {ai_char}'s next line from this script, in order, staying on the "
            f"written words as closely as a natural performance allows. If the actor drifts, bridge briefly "
-           f"and steer back to the script. SCRIPT:\n{(scene.get('script') or '').strip()[:2500]}\n "
-           if (scene.get('script') or '').strip() else "") +
-        "Stay fully in character. Respond with ONE natural spoken line that reacts truthfully "
-        "to what the actor just said and keeps the scene alive — never narrate, never break "
-        "character, no stage directions inside the spoken line, no emojis. Match the scene's "
-        "emotional temperature; if the actor plays big, meet them; if they underplay, hold the "
-        "tension. Keep the line to one or two short sentences — say it in a breath — for a fast, "
-        "snappy exchange, unless a big moment earns more. "
+           f"and steer back to the script. SCRIPT:\n{(scene.get('script') or '').strip()[:3000]}\n "
+           if (scene.get('script') or '').strip() and not forced_line else "") +
+        (f"You MUST deliver EXACTLY this next scripted line, word for word, changing nothing: "
+         f"\"{forced_line}\". Put it verbatim in \"line\". "
+         if forced_line else
+         "Stay fully in character. Respond with ONE natural spoken line that reacts truthfully "
+         "to what the actor just said and keeps the scene alive — never narrate, never break "
+         "character, no stage directions inside the spoken line, no emojis. Match the scene's "
+         "emotional temperature; if the actor plays big, meet them; if they underplay, hold the "
+         "tension. Keep the line to one or two short sentences — say it in a breath — for a fast, "
+         "snappy exchange, unless a big moment earns more. ") +
         "SEPARATELY, as a casting-savvy reader, give a one-sentence private 'note' on the actor's "
         "delivery (specific and useful — pace, choice, listening, stakes), and rate 'stakes' 1-5. "
         "Respond ONLY as compact json: {\"line\": string, \"emotion\": one word for how you say it, "
         "\"note\": string, \"stakes\": integer 1-5}."
     )
     lines = [{"role": "system", "content": system}]
-    if scene.get("opening"):
-        lines.append({"role": "assistant", "content": json.dumps(
-            {"line": scene["opening"], "emotion": "neutral", "note": "", "stakes": 3})})
-    for turn in (history or [])[-8:]:                      # cap context; keep the last few beats
+    # Feed the whole scene back (capped generously) so the co-star truly has the conversation in
+    # mind, not just the last line. Assistant turns are the co-star's own past lines, plain text.
+    for turn in (history or [])[-40:]:
         role = "user" if turn.get("who") == "actor" else "assistant"
         lines.append({"role": role, "content": turn.get("text", "")})
     cue = actor_line + (f"  [delivered {actor_emotion}]" if actor_emotion else "")
     lines.append({"role": "user", "content": cue})
     body = _post(DASHSCOPE_URL, {"model": COSTAR_MODEL, "response_format": {"type": "json_object"},
-                                 "max_tokens": 120, "temperature": 0.8, "messages": lines})
+                                 "max_tokens": 160, "temperature": 0.4 if forced_line else 0.8,
+                                 "messages": lines})
     content = body["choices"][0]["message"]["content"]
     try:
         out = json.loads(content)
     except json.JSONDecodeError:
         out = {"line": content.strip()[:200], "emotion": "neutral", "note": "", "stakes": 3}
+    if forced_line:                       # never let a paraphrase through in scripted mode
+        out["line"] = forced_line
     out["_usage"] = body.get("usage", {})
     return out
 
@@ -209,7 +265,9 @@ def _tts_call(model, text, voice, instruction=None):
     inp = {"text": text, "voice": voice or TTS_VOICE, "language_type": TTS_LANG}
     if instruction:
         inp["instructions"] = instruction       # only qwen3-tts-instruct-flash reads this
-        inp["optimize_instructions"] = True      # let the model expand a terse instruction well
+        # optimize_instructions re-expands the cue and tends to over-act / slow the tempo, which is
+        # exactly the "voice drags" problem — our instructions are already concrete, so leave it off.
+        inp["optimize_instructions"] = False
     out = _post(TTS_SUBMIT, {"model": model, "input": inp, "parameters": {}}).get("output", {})
     audio = out.get("audio", {}) or {}
     if audio.get("data"):                                  # inline base64 (streamed models)
@@ -314,6 +372,30 @@ def _decode_data_uri(uri):
     return base64.b64decode(b64), ctype, ext
 
 
+def pad_wav(raw, ctype, min_sec=2.2):
+    """wan2.7-i2v rejects driving audio under 2s ("duration should be at least 2s"), but terse lines
+    voice to ~1.8s. Append trailing silence to reach `min_sec` so short co-star lines still animate.
+    Only touches PCM WAV; anything else (or an undecodable blob) passes through untouched."""
+    if "wav" not in (ctype or ""):
+        return raw
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as w:
+            nch, sw, fr, nframes = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+            frames = w.readframes(nframes)
+        if not fr or nframes / float(fr) >= min_sec:
+            return raw
+        pad = int((min_sec - nframes / float(fr)) * fr) + fr // 5  # reach min_sec + ~0.2s margin
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as o:
+            o.setnchannels(nch)
+            o.setsampwidth(sw)
+            o.setframerate(fr)
+            o.writeframes(frames + b"\x00" * (pad * nch * sw))
+        return buf.getvalue()
+    except (wave.Error, EOFError, ValueError):
+        return raw
+
+
 def oss_enabled():
     return bool(OSS_BUCKET and OSS_KEY_ID and OSS_KEY_SECRET)
 
@@ -380,14 +462,63 @@ def avatar_status(task_id):
     return res
 
 
-def costar(scene, history, audio_data_url=None, text=None):
+# Theatre convention: a bare "Line!" (or "line please" / "what's my line") is not dialogue — it's
+# the actor calling for a prompt because they've gone up on their line. We only treat it as a cue
+# when the whole utterance is that call (a few short filler words allowed), never when "line" shows
+# up inside a real sentence ("draw a line", "hold the line"), so it can't hijack a scripted read.
+_LINE_CUE_WORDS = {"line", "lines", "please", "my", "whats", "what", "the", "is", "again",
+                   "call", "prompt", "next", "give", "me", "a", "im", "up", "on", "sorry"}
+
+
+def is_line_cue(text):
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    if not words or len(words) > 4 or "line" not in words:
+        return False
+    return all(w.replace("'", "") in _LINE_CUE_WORDS for w in words)
+
+
+def suggest_line(scene, history):
+    """Improv 'Line!': the actor is stuck, so pitch ONE natural line their character could say
+    next to keep the scene moving. Returns just the words (no note/coaching)."""
+    human_char = scene.get("human_character", "the actor")
+    system = (
+        f"You are a scene-partner AI helping an actor who just called 'Line!' — they're stuck and "
+        f"need a prompt. Suggest ONE short, natural line that the character '{human_char}' could say "
+        f"next to keep this scene alive and truthful. SCENE: {scene.get('premise', 'an improv')}. "
+        f"TONE: {scene.get('tone', 'grounded')}. Reply with ONLY the line itself — no quotes, no name, "
+        f"no explanation."
+    )
+    lines = [{"role": "system", "content": system}]
+    for turn in (history or [])[-20:]:
+        role = "assistant" if turn.get("who") == "actor" else "user"   # mirror: help THEM write
+        lines.append({"role": role, "content": turn.get("text", "")})
+    body = _post(DASHSCOPE_URL, {"model": COSTAR_MODEL, "max_tokens": 60,
+                                 "temperature": 0.8, "messages": lines})
+    return (body["choices"][0]["message"].get("content") or "").strip().strip('"').strip()
+
+
+def costar(scene, history, audio_data_url=None, text=None, forced_line=None, prompt_line=None):
     """One audition beat: hear the actor -> reply in character -> voice it.
-    `text` skips ASR entirely (the browser already transcribed the line) — the fast path."""
+    `text` skips ASR entirely (the browser already transcribed the line) — the fast path.
+    `forced_line`: scripted mode — the co-star must say exactly this (see costar_reply).
+    `prompt_line`: the actor's own next scripted line; if they call 'Line!', we feed them this
+    instead of taking a co-star turn (and don't advance the scene)."""
     if text is not None:
         heard = {"text": text, "emotion": None}
     else:
         heard = transcribe(audio_data_url, scene.get("language", "en"))
-    reply = costar_reply(scene, history, heard.get("text", ""), heard.get("emotion"))
+
+    # "Line!" — feed the actor their line (scripted) or suggest one (improv); no co-star turn.
+    if is_line_cue(heard.get("text", "")):
+        fed = (prompt_line or "").strip() or suggest_line(scene, history)
+        try:                                              # plain, unhurried prompter read
+            spoken = synthesize(fed, scene.get("voice") or TTS_VOICE)
+        except Exception as e:
+            spoken = None
+        return {"heard": heard, "prompt": True, "line": fed, "emotion": "neutral",
+                "note": "", "stakes": None, "audio": spoken}
+
+    reply = costar_reply(scene, history, heard.get("text", ""), heard.get("emotion"), forced_line)
     try:
         spoken = synthesize(reply.get("line", ""), scene.get("voice") or TTS_VOICE,
                             emotion=reply.get("emotion"), tone=scene.get("tone"))
@@ -395,6 +526,41 @@ def costar(scene, history, audio_data_url=None, text=None):
         spoken, reply["_tts_error"] = None, str(e)[:200]
     return {"heard": heard, "line": reply.get("line", ""), "emotion": reply.get("emotion"),
             "note": reply.get("note", ""), "stakes": reply.get("stakes"), "audio": spoken}
+
+
+def perceive(image_data_url, prior=None):
+    """The Director's eye: qwen3-vl-flash reads one performance frame and returns a directorial
+    call as JSON (speaker, emotion, shot, look, note). One frame in, one decisive call out."""
+    hint = f" Prior read for continuity: {json.dumps(prior)[:300]}." if prior else ""
+    body = _post(DASHSCOPE_URL, {
+        "model": PERCEPTION_MODEL, "response_format": {"type": "json_object"},
+        "max_tokens": 220, "temperature": 0.4,
+        "messages": [
+            {"role": "system", "content": PERCEIVE_SYSTEM},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Direct this frame. Return json." + hint},
+                {"type": "image_url", "image_url": {"url": image_data_url}}]}]})
+    content = body["choices"][0]["message"]["content"]
+    try:
+        read = json.loads(content)
+    except json.JSONDecodeError:
+        read = {"director_note": content[:120], "_unparsed": True}
+    read["_usage"] = body.get("usage", {})
+    read["_model"] = PERCEPTION_MODEL
+    return read
+
+
+def generate_environment(prompt):
+    """Text -> cinematic 16:9 environment still via qwen-image (async submit + poll). Returns
+    (image_bytes, content_type). Empty world (no people) — we composite the real performers on top."""
+    styled = (prompt or "a cinematic empty stage").strip() + (
+        ", cinematic establishing shot, empty environment, no people, no person, "
+        "atmospheric dramatic lighting, film still, wide angle, photographic")
+    out = _submit_and_poll(IMG_SUBMIT, {"model": IMAGE_MODEL, "input": {"prompt": styled},
+                                        "parameters": {"size": "1280*720", "n": 1}})
+    url = out["results"][0]["url"]
+    with urllib.request.urlopen(url, timeout=30) as r:   # re-host bytes (OSS url expires in 24h)
+        return r.read(), r.headers.get("Content-Type", "image/png")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -411,6 +577,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _bytes(self, code, data, ctype):
+        self.send_response(code); self._cors()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_OPTIONS(self):
         self.send_response(204); self._cors(); self.end_headers()
 
@@ -419,6 +593,16 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path.rstrip("/")
         if path == "/warm":                        # cheap pre-roll: spins a cold instance up
             return self._json(200, {"warm": True})
+        if path == "/background":                  # director: text -> empty environment still (image bytes)
+            if not API_KEY:
+                return self._json(500, {"error": "QWEN_API_KEY not configured"})
+            q = parse_qs(u.query)
+            prompt = (q.get("prompt", [""])[0] or q.get("q", [""])[0]).strip()
+            try:
+                data, ctype = generate_environment(prompt)
+                return self._bytes(200, data, ctype)
+            except Exception as e:
+                return self._json(502, {"error": str(e)[:200]})
         if path == "/avatar":                      # poll a talking-head task: /avatar?task_id=...
             tid = (parse_qs(u.query).get("task_id") or [""])[0]
             if not tid:
@@ -436,12 +620,13 @@ class Handler(BaseHTTPRequestHandler):
                                     "costar_model": COSTAR_MODEL, "tts_model": TTS_MODEL,
                                     "tts_instruct_model": TTS_INSTRUCT_MODEL,
                                     "expressive": TTS_EXPRESSIVE, "has_key": bool(API_KEY),
-                                    "avatar_model": AVATAR_MODEL, "oss": oss_enabled()})
+                                    "avatar_model": AVATAR_MODEL, "oss": oss_enabled(),
+                                    "perception_model": PERCEPTION_MODEL, "image_model": IMAGE_MODEL})
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        if path not in ("/costar", "/say", "/portrait", "/avatar"):
+        if path not in ("/costar", "/say", "/portrait", "/avatar", "/perceive", "/transcribe"):
             return self._json(404, {"error": "not found"})
         if not API_KEY:
             return self._json(500, {"error": "QWEN_API_KEY not configured"})
@@ -451,6 +636,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json(400, {"error": f"bad request: {e}"})
         try:
+            if path == "/perceive":                        # director's eye: frame -> directorial call
+                if not req.get("image"):
+                    return self._json(400, {"error": "missing 'image'"})
+                return self._json(200, perceive(req["image"], req.get("prior")))
+            if path == "/transcribe":                       # bare ASR (shared): audio -> text + emotion
+                if not req.get("audio"):
+                    return self._json(400, {"error": "missing 'audio'"})
+                return self._json(200, transcribe(req["audio"], req.get("language", "en")))
             if path == "/say":                             # voice arbitrary text (e.g. the opening line)
                 if not req.get("text"):
                     return self._json(400, {"error": "missing 'text'"})
@@ -468,6 +661,7 @@ class Handler(BaseHTTPRequestHandler):
                 audio_url = req.get("audio_url")
                 if not audio_url and req.get("audio"):      # base64 WAV → host on OSS → public url
                     raw, ctype, ext = _decode_data_uri(req["audio"])
+                    raw = pad_wav(raw, ctype)               # wan2.7-i2v needs >= 2s of driving audio
                     audio_url = oss_host(raw, ctype, ext)
                 if not audio_url:
                     return self._json(400, {"error": "need 'audio' (base64) or public 'audio_url'"})
@@ -478,7 +672,8 @@ class Handler(BaseHTTPRequestHandler):
             if not req.get("scene"):
                 return self._json(400, {"error": "missing 'scene'"})
             return self._json(200, costar(req["scene"], req.get("history") or [],
-                                          req.get("audio"), req.get("text")))
+                                          req.get("audio"), req.get("text"),
+                                          req.get("forced_line"), req.get("prompt_line")))
         except urllib.error.HTTPError as e:
             return self._json(502, {"error": "dashscope", "detail": e.read().decode()[:300]})
         except Exception as e:
@@ -490,5 +685,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("FC_SERVER_PORT") or os.environ.get("PORT") or 9000)
-    print(f"cut audition co-star on :{port}  reader={COSTAR_MODEL}  tts={TTS_MODEL}  key={'set' if API_KEY else 'MISSING'}")
+    print(f"cut-api on :{port}  reader={COSTAR_MODEL}  tts={TTS_MODEL}  eye={PERCEPTION_MODEL}  key={'set' if API_KEY else 'MISSING'}")
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
