@@ -43,6 +43,8 @@ button{font:inherit;border:0;border-radius:9px;padding:11px 14px;cursor:pointer;
 button:disabled{opacity:.4;cursor:not-allowed}
 button:not(:disabled):active{transform:translateY(1px)}
 .primary{background:linear-gradient(180deg,var(--ember-2),var(--ember));color:#1a0f08;font-weight:700}
+.stop{background:transparent;color:#ff6a6a;border:1px solid rgba(255,106,106,.45);font-weight:600}
+.stop:not(:disabled):hover{background:rgba(255,106,106,.1)}
 .ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
 .hint{color:var(--muted);margin-top:auto;padding-top:12px}
 

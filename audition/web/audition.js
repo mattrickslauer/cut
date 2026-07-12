@@ -10,7 +10,7 @@ const ASR_RATE = 16000;        // qwen3-asr-flash wants 16 kHz mono (see researc
 const START_RMS = 0.028;       // onset threshold (enter HEARING)
 const END_RMS   = 0.016;       // below this counts as silence (hysteresis vs START)
 const ONSET_BLK = 2;           // consecutive loud blocks before we believe it's speech
-const END_SILENCE_MS = 900;    // trailing silence that ends your line
+const END_SILENCE_MS = 1200;   // trailing silence that ends your line (waits so a dramatic pause doesn't cut you off)
 const MIN_SPEECH_MS  = 400;    // ignore blips shorter than this
 const MAX_LINE_MS    = 20000;  // hard cap on one line
 const PREROLL = 5;             // blocks of audio kept before onset so the first word isn't clipped
@@ -42,7 +42,7 @@ const el = id => document.getElementById(id);
 const $ = {
   sceneSel:el('sceneSel'), humanChar:el('humanChar'), aiChar:el('aiChar'),
   premise:el('scenePremise'), opening:el('sceneOpening'),
-  startBtn:el('startBtn'), newTakeBtn:el('newTakeBtn'), saveBtn:el('saveBtn'),
+  startBtn:el('startBtn'), stopBtn:el('stopBtn'), newTakeBtn:el('newTakeBtn'), saveBtn:el('saveBtn'),
   cam:el('cam'), camOff:el('camOff'), pill:el('pill'), meterFill:el('meterFill'),
   subtitle:el('subtitle'), whoSpoke:el('whoSpoke'), dialogue:el('dialogue'),
   notesList:el('notesList'), stakes:document.querySelectorAll('.stakes i'),
@@ -101,13 +101,32 @@ $.startBtn.onclick = async () => {
     S.source.connect(S.node); S.node.connect(S.audioCtx.destination);   // node emits silence (no echo)
     S.recorder = new MediaRecorder(S.stream, pickMime());               // full take (video+audio)
     S.recorder.ondataavailable = e => e.data.size && S.chunks.push(e.data);
-    $.startBtn.disabled = true; $.newTakeBtn.disabled = false; $.saveBtn.disabled = false;
+    $.startBtn.disabled = true; $.stopBtn.disabled = false;
+    $.newTakeBtn.disabled = false; $.saveBtn.disabled = false;
     beginTake(true);
   } catch (e) { setState('idle'); $.pill.textContent = 'Camera/mic blocked: ' + e.message; }
+};
+
+// stop the whole audition: end capture, release camera+mic, reset to idle.
+$.stopBtn.onclick = () => {
+  stopSR();
+  try { $.player.pause(); } catch(_){}
+  try { S.recorder && S.recorder.state !== 'inactive' && S.recorder.stop(); } catch(_){}
+  try { S.node && S.node.disconnect(); S.source && S.source.disconnect(); } catch(_){}
+  try { S.audioCtx && S.audioCtx.close(); } catch(_){}
+  try { S.stream && S.stream.getTracks().forEach(t => t.stop()); } catch(_){}
+  clearInterval(S.timer);
+  S.stream = S.audioCtx = S.node = S.source = null; S.state = 'idle';
+  $.cam.srcObject = null; $.camOff.style.display = '';
+  $.subtitle.textContent = ''; $.whoSpoke.textContent = ''; $.meterFill.style.width = '0';
+  $.startBtn.disabled = false; $.stopBtn.disabled = true;
+  $.newTakeBtn.disabled = true; $.saveBtn.disabled = true;
+  setState('idle');
 };
 function pickMime(){ for (const m of ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']) if (MediaRecorder.isTypeSupported(m)) return {mimeType:m}; return {}; }
 
 function beginTake(first){
+  stopSR(); try { $.player.pause(); } catch(_){}      // cancel any in-flight turn from the previous take
   S.history = []; S.take = first ? 1 : S.take + 1;
   $.takeTag.textContent = 'take ' + S.take;
   $.dialogue.innerHTML = ''; setStakes(0);
@@ -121,53 +140,80 @@ function beginTake(first){
 }
 $.newTakeBtn.onclick = () => { if (S.state==='thinking') return; beginTake(false); };
 
-// ---- continuous capture + VAD ------------------------------------------
+// ---- turn detection -----------------------------------------------------
+// Primary: the browser's SpeechRecognition — it transcribes as you talk, so the
+// transcript is ready the instant you stop. We POST *text*, and the reader only does
+// reply + TTS (~3s) instead of ASR + reply + TTS (~6s). Fallback: the energy-VAD below
+// uploads audio for server ASR (browsers without SpeechRecognition, e.g. Firefox).
+const SR_CLASS = window.SpeechRecognition || window.webkitSpeechRecognition;
+const USE_SR = !!SR_CLASS;
+
 function resetCapture(){ S.buffer=[]; S.bufLen=0; S.onset=0; S.silenceMs=0; S.speechMs=0; S.lineMs=0; }
 
+// hand the scene back to the actor
+function resumeListening(){ setState('listening'); if (USE_SR) startSR(); }
+
+function startSR(){
+  if (!USE_SR || S.state !== 'listening') return;
+  const rec = new SR_CLASS();
+  rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+  S.recog = rec; let finalText = '';
+  rec.onresult = e => {
+    let interim=''; finalText='';
+    for (const res of e.results){ res.isFinal ? (finalText += res[0].transcript) : (interim += res[0].transcript); }
+    if ((interim || finalText) && S.state === 'listening') setState('hearing');   // you started talking
+  };
+  rec.onend = () => {
+    if (S.state !== 'listening' && S.state !== 'hearing') return;   // stopped / already in a turn
+    const t = finalText.trim();
+    if (t) runTurn({ text: t });                                    // your line is ready → reply
+    else startSR();                                                 // heard nothing → keep listening
+  };
+  rec.onerror = ev => {
+    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') return;
+    if (S.state === 'listening' || S.state === 'hearing') setTimeout(startSR, 250);
+  };
+  try { rec.start(); } catch(_){}
+}
+function stopSR(){ try { if (S.recog){ S.recog.onend = S.recog.onerror = null; S.recog.abort(); S.recog = null; } } catch(_){} }
+
+// energy-VAD fallback (also drives the live level meter in both modes)
 function onAudio(e){
   const blk = e.inputBuffer.getChannelData(0);
   let sum=0; for (let i=0;i<blk.length;i++) sum += blk[i]*blk[i];
   const rms = Math.sqrt(sum/blk.length);
+  $.meterFill.style.width = Math.min(100, rms*450) + '%';          // live level (always)
+  if (USE_SR) return;                                              // SR drives turns; audio only feeds the meter
   const ms = (blk.length / S.srcRate) * 1000;
-  $.meterFill.style.width = Math.min(100, rms*450) + '%';        // live level
-
-  if (S.state !== 'listening' && S.state !== 'hearing') return;  // ignore mic while reader talks
+  if (S.state !== 'listening' && S.state !== 'hearing') return;
   S.ring.push(new Float32Array(blk)); if (S.ring.length > PREROLL) S.ring.shift();
-
   if (S.state === 'listening'){
-    if (rms > START_RMS){ if (++S.onset >= ONSET_BLK){          // speech onset
+    if (rms > START_RMS){ if (++S.onset >= ONSET_BLK){
       setState('hearing'); S.buffer = S.ring.slice(); S.bufLen = S.buffer.reduce((n,b)=>n+b.length,0);
       S.silenceMs=0; S.speechMs=0; S.lineMs=0; } }
     else S.onset = 0;
     return;
   }
-  // HEARING: accumulate + watch for end of line
   S.buffer.push(new Float32Array(blk)); S.bufLen += blk.length; S.lineMs += ms;
   if (rms < END_RMS) S.silenceMs += ms; else { S.silenceMs = 0; S.speechMs += ms; }
   if ((S.speechMs >= MIN_SPEECH_MS && S.silenceMs >= END_SILENCE_MS) || S.lineMs >= MAX_LINE_MS){
-    if (S.speechMs < MIN_SPEECH_MS){ resetCapture(); setState('listening'); return; }
-    endLine();
+    if (S.speechMs < MIN_SPEECH_MS){ resetCapture(); resumeListening(); return; }
+    const wav = encodeWav(flatten(S.buffer, S.bufLen), S.srcRate); resetCapture(); runTurn({ audio: wav });
   }
 }
 
-function endLine(){
+// ---- one beat: POST /costar (text or audio) → render → reader speaks → resume ----
+async function runTurn(extra){
   setState('thinking');
-  const wav = encodeWav(flatten(S.buffer, S.bufLen), S.srcRate);
-  resetCapture();
-  sendLine(wav);
-}
-
-// ---- the beat: POST /costar --------------------------------------------
-async function sendLine(wavDataUri){
   const thinking = addTurn('costar', S.scene.ai_character, '…', true);
   try {
-    const r = await fetch(BACKEND_URL + '/costar', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ scene: sceneForApi(), history: S.history, audio: wavDataUri }) });
+    const r = await fetch(BACKEND_URL + '/costar', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(Object.assign({ scene: sceneForApi(), history: S.history }, extra)) });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
     thinking.remove();
-    const heard = (data.heard && data.heard.text) || '(unclear)';
+    const heard = (data.heard && data.heard.text) || extra.text || '(unclear)';
     addTurn('actor', 'You', heard); S.history.push({ who:'actor', text:heard });
     addTurn('costar', S.scene.ai_character, data.line); S.history.push({ who:'costar', text:data.line });
     if (data.note) addNote(heard, data.note);
@@ -176,7 +222,7 @@ async function sendLine(wavDataUri){
   } catch (e) {
     thinking.remove();
     $.pill.textContent = 'Reader error: ' + e.message; $.pill.className = 'pill idle';
-    setTimeout(()=>setState('listening'), 1400);          // recover, keep the scene alive
+    setTimeout(resumeListening, 1400);                     // recover, keep the scene alive
   }
 }
 
@@ -197,11 +243,11 @@ async function say(who, line, audioUri){
   }
   if (audioUri){
     $.player.src = audioUri;
-    $.player.onended = () => setState('listening');
+    $.player.onended = resumeListening;
     $.player.play().catch(()=>beat(line));
   } else beat(line);                                       // no audio available — read-beat then listen
 }
-function beat(line){ setTimeout(()=>setState('listening'), Math.min(4500, 900 + line.length * 45)); }
+function beat(line){ setTimeout(resumeListening, Math.min(4500, 900 + line.length * 45)); }
 
 function sceneForApi(){ const s=S.scene; return {
   ai_character:s.ai_character, human_character:s.human_character,

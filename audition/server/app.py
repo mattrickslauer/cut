@@ -7,9 +7,10 @@ server-side. Deploys independently of the director's cut-perceive function.
 
   GET  /health  -> liveness + config sanity
   GET  /warm    -> no-op that spins a cold instance up before an audition starts
-  POST /costar  -> { audio, scene, history? } -> the AI scene-partner's turn:
-                   ASR the actor's line, generate the character's spoken reply
-                   (qwen-max), voice it (qwen-tts). One HTTP round-trip = one beat.
+  POST /costar  -> { audio|text, scene, history? } -> the AI scene-partner's turn:
+                   ASR the actor's line (or take `text` if the browser already
+                   transcribed it — the fast path), generate the character's spoken
+                   reply (qwen-flash), voice it (qwen-tts). One round-trip = one beat.
   POST /say     -> { text, voice? } -> { audio } : voice arbitrary text (the opening
                    line), so the whole scene is spoken, not just the replies.
 
@@ -22,7 +23,7 @@ not lag. Cold start only hits the first POST after idle — hidden behind GET /w
 Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
-import os, json, base64, urllib.request, urllib.error
+import os, json, urllib.request, urllib.error
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -31,7 +32,7 @@ DASHSCOPE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/com
 # NOTE: verify model id / voices / response shape against Model Studio docs like asr.md did for ASR.
 TTS_SUBMIT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 ASR_MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash")
-COSTAR_MODEL = os.environ.get("COSTAR_MODEL", "qwen-max")
+COSTAR_MODEL = os.environ.get("COSTAR_MODEL", "qwen-flash")  # fastest good reply (~1.5s vs qwen-max ~2.2s)
 TTS_MODEL = os.environ.get("TTS_MODEL", "qwen3-tts-flash")  # verified live on the intl Model Studio key
 TTS_VOICE = os.environ.get("TTS_VOICE", "Cherry")  # per-character voice overrides this
 API_KEY = os.environ.get("QWEN_API_KEY", "").strip().strip('"').strip("'")
@@ -79,7 +80,8 @@ def costar_reply(scene, history, actor_line, actor_emotion=None):
         "to what the actor just said and keeps the scene alive — never narrate, never break "
         "character, no stage directions inside the spoken line, no emojis. Match the scene's "
         "emotional temperature; if the actor plays big, meet them; if they underplay, hold the "
-        "tension. Keep the line short enough to say in one breath unless the moment earns more. "
+        "tension. Keep the line to one or two short sentences — say it in a breath — for a fast, "
+        "snappy exchange, unless a big moment earns more. "
         "SEPARATELY, as a casting-savvy reader, give a one-sentence private 'note' on the actor's "
         "delivery (specific and useful — pace, choice, listening, stakes), and rate 'stakes' 1-5. "
         "Respond ONLY as compact json: {\"line\": string, \"emotion\": one word for how you say it, "
@@ -95,7 +97,7 @@ def costar_reply(scene, history, actor_line, actor_emotion=None):
     cue = actor_line + (f"  [delivered {actor_emotion}]" if actor_emotion else "")
     lines.append({"role": "user", "content": cue})
     body = _post(DASHSCOPE_URL, {"model": COSTAR_MODEL, "response_format": {"type": "json_object"},
-                                 "max_tokens": 200, "temperature": 0.8, "messages": lines})
+                                 "max_tokens": 120, "temperature": 0.8, "messages": lines})
     content = body["choices"][0]["message"]["content"]
     try:
         out = json.loads(content)
@@ -106,27 +108,29 @@ def costar_reply(scene, history, actor_line, actor_emotion=None):
 
 
 def synthesize(text, voice=None):
-    """Voice a line via qwen-tts (synchronous multimodal-generation). Returns a
-    'data:audio/...;base64,...' URI the browser can play directly. Re-hosts the bytes
-    because DashScope audio URLs expire. NOTE: verify model/voice/shape vs Model Studio."""
+    """Voice a line via qwen3-tts-flash (synchronous multimodal-generation). Returns
+    something the browser can set as <audio>.src. Fast path: hand back the OSS result
+    URL directly (https-upgraded) so the browser streams it — no server-side fetch or
+    base64 re-host on the critical path. Falls back to a data: URI if only bytes come
+    back. NOTE: the OSS URL expires (~24h); fine for immediate playback."""
     out = _post(TTS_SUBMIT, {"model": TTS_MODEL,
                              "input": {"text": text, "voice": voice or TTS_VOICE},
                              "parameters": {}}).get("output", {})
     audio = out.get("audio", {}) or {}
-    if audio.get("data"):                                  # inline base64 (some models)
-        b64, ctype = audio["data"], "audio/wav"
-    elif audio.get("url"):                                 # fetch + inline the bytes
-        with urllib.request.urlopen(audio["url"], timeout=30) as r:
-            raw, ctype = r.read(), r.headers.get("Content-Type", "audio/wav")
-        b64 = base64.b64encode(raw).decode()
+    if audio.get("url"):                                   # fast path — stream straight from OSS
+        return audio["url"].replace("http://", "https://", 1)
+    if audio.get("data"):                                  # inline base64 fallback
+        return "data:audio/wav;base64," + audio["data"]
+    raise RuntimeError("tts returned no audio: " + json.dumps(out)[:200])
+
+
+def costar(scene, history, audio_data_url=None, text=None):
+    """One audition beat: hear the actor -> reply in character -> voice it.
+    `text` skips ASR entirely (the browser already transcribed the line) — the fast path."""
+    if text is not None:
+        heard = {"text": text, "emotion": None}
     else:
-        raise RuntimeError("tts returned no audio: " + json.dumps(out)[:200])
-    return f"data:{ctype};base64,{b64}"
-
-
-def costar(scene, history, audio_data_url):
-    """One audition beat: hear the actor -> reply in character -> voice it."""
-    heard = transcribe(audio_data_url, scene.get("language", "en"))
+        heard = transcribe(audio_data_url, scene.get("language", "en"))
     reply = costar_reply(scene, history, heard.get("text", ""), heard.get("emotion"))
     try:
         spoken = synthesize(reply.get("line", ""), scene.get("voice") or TTS_VOICE)
@@ -179,11 +183,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not req.get("text"):
                     return self._json(400, {"error": "missing 'text'"})
                 return self._json(200, {"audio": synthesize(req["text"], req.get("voice"))})
-            if not req.get("audio"):
-                return self._json(400, {"error": "missing 'audio'"})
+            if not req.get("audio") and not req.get("text"):
+                return self._json(400, {"error": "missing 'audio' or 'text'"})
             if not req.get("scene"):
                 return self._json(400, {"error": "missing 'scene'"})
-            return self._json(200, costar(req["scene"], req.get("history") or [], req["audio"]))
+            return self._json(200, costar(req["scene"], req.get("history") or [],
+                                          req.get("audio"), req.get("text")))
         except urllib.error.HTTPError as e:
             return self._json(502, {"error": "dashscope", "detail": e.read().decode()[:300]})
         except Exception as e:

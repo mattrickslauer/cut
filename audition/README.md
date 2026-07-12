@@ -21,21 +21,29 @@ audition/
 ## Architecture — turn-based on scale-to-zero Alibaba FC
 
 ```
-Browser (web/index.html)
+Browser (web/index.html)  — hands-free: SpeechRecognition transcribes as you act
   ── pick sides ──▶ scene config
-  ── deliver line ─▶ Web Audio capture → 16 kHz mono WAV → base64
-        │  POST /costar  { scene, history, audio }
-        ▼
+  ── you speak ───▶ browser SpeechRecognition → text  (ready the instant you stop)
+        │  POST /costar  { scene, history, text }        ← fast path, no audio upload
+        ▼                (fallback: energy-VAD → 16 kHz WAV → { audio } → server ASR)
   Alibaba Function Compute  (cut-audition, custom.debian10, scale-to-zero)
-        ├─ qwen3-asr-flash   actor's line → text (+ emotion)      [DashScope, HTTP one-shot]
-        ├─ qwen-max          in-character reply + coaching note   [DashScope, HTTP one-shot]
-        └─ qwen3-tts-flash   voice the reply → audio data URI     [DashScope, HTTP one-shot]
+        ├─ qwen3-asr-flash   only on the fallback audio path       [DashScope, HTTP one-shot]
+        ├─ qwen-flash        in-character reply + coaching note     [DashScope, HTTP one-shot]
+        └─ qwen3-tts-flash   voice the reply → OSS audio URL        [DashScope, HTTP one-shot]
         ▼
   { heard, line, note, stakes, audio }  → render, play, coach
 ```
 
-**One POST = one acting beat (~1–2s).** A scene partner delivers *lines* with natural beats,
-so turn-based HTTP is the right latency target — the pause reads as acting, not lag.
+**One POST = one acting beat.** A scene partner delivers *lines* with natural beats, so
+turn-based HTTP is the right target — the pause reads as acting, not lag.
+
+### Latency (measured, this key)
+- **Fast text path** (browser transcribes → POST `text`): reply `qwen-flash` ~1.5s + TTS
+  `qwen3-tts-flash` ~1.7s ≈ **~3–4s** to a voiced reply. The audio fallback adds ASR ~2.8s.
+- Wins applied: browser STT removes the ASR upload; `qwen-flash` (not `qwen-max`); TTS
+  returns the **OSS URL** so the browser streams it (no server re-host); replies kept short.
+- Deployed on FC **in ap-southeast-1** (co-located with DashScope) the per-call cross-region
+  RTT paid when running locally disappears — expect faster than the local numbers.
 
 ### Why not a streaming WebSocket?
 `research/asr.md` already made this call: a scale-to-zero FC function can't hold a persistent
