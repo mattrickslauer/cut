@@ -1,0 +1,51 @@
+{
+  "clip": "",
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "meta": { "source": "audition", "scene": "will-hunting", "title": "It's not your fault", "take": 1 },
+  "shots": [
+    {
+      "id": "s0", "start": 0.0, "end": 2.4,
+      "shot": "MS", "subject": "A", "look": "Golden",
+      "transition_in": "cut", "transition_dur": 0.4,
+      "note": ""
+    },
+    {
+      "id": "s1", "start": 2.4, "end": 4.6,
+      "shot": "MCU", "subject": "B", "look": "Golden",
+      "transition_in": "cut", "transition_dur": 0.4,
+      "note": "It's not your fault."
+    },
+    {
+      "id": "s2", "start": 4.6, "end": 6.0,
+      "shot": "MS", "subject": "A", "look": "Golden",
+      "transition_in": "cut", "transition_dur": 0.4,
+      "note": ""
+    },
+    {
+      "id": "s3", "start": 6.0, "end": 9.2,
+      "shot": "MCU", "subject": "B", "look": "Golden",
+      "transition_in": "cut", "transition_dur": 0.4,
+      "note": "Look at me, son. It's not your fault."
+    },
+    {
+      "id": "s4", "start": 9.2, "end": 10.6,
+      "shot": "MS", "subject": "A", "look": "Golden",
+      "transition_in": "cut", "transition_dur": 0.4,
+      "note": ""
+    },
+    {
+      "id": "s5", "start": 10.6, "end": 13.0,
+      "shot": "MCU", "subject": "B", "look": "Golden",
+      "transition_in": "cut", "transition_dur": 0.4,
+      "note": "It's not your fault."
+    },
+    {
+      "id": "s6", "start": 13.0, "end": 14.4,
+      "shot": "MS", "subject": "A", "look": "Golden",
+      "transition_in": "cut", "transition_dur": 0.4,
+      "note": ""
+    }
+  ]
+}
