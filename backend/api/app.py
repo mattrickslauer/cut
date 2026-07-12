@@ -41,7 +41,7 @@ not lag. Cold start only hits the first POST after idle — hidden behind GET /w
 Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
-import os, re, json, base64, time, hmac, hashlib, urllib.request, urllib.error
+import os, re, json, base64, time, hmac, hashlib, io, wave, urllib.request, urllib.error
 from email.utils import formatdate
 from urllib.parse import urlparse, parse_qs, quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -372,6 +372,30 @@ def _decode_data_uri(uri):
     return base64.b64decode(b64), ctype, ext
 
 
+def pad_wav(raw, ctype, min_sec=2.2):
+    """wan2.7-i2v rejects driving audio under 2s ("duration should be at least 2s"), but terse lines
+    voice to ~1.8s. Append trailing silence to reach `min_sec` so short co-star lines still animate.
+    Only touches PCM WAV; anything else (or an undecodable blob) passes through untouched."""
+    if "wav" not in (ctype or ""):
+        return raw
+    try:
+        with wave.open(io.BytesIO(raw), "rb") as w:
+            nch, sw, fr, nframes = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+            frames = w.readframes(nframes)
+        if not fr or nframes / float(fr) >= min_sec:
+            return raw
+        pad = int((min_sec - nframes / float(fr)) * fr) + fr // 5  # reach min_sec + ~0.2s margin
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as o:
+            o.setnchannels(nch)
+            o.setsampwidth(sw)
+            o.setframerate(fr)
+            o.writeframes(frames + b"\x00" * (pad * nch * sw))
+        return buf.getvalue()
+    except (wave.Error, EOFError, ValueError):
+        return raw
+
+
 def oss_enabled():
     return bool(OSS_BUCKET and OSS_KEY_ID and OSS_KEY_SECRET)
 
@@ -637,6 +661,7 @@ class Handler(BaseHTTPRequestHandler):
                 audio_url = req.get("audio_url")
                 if not audio_url and req.get("audio"):      # base64 WAV → host on OSS → public url
                     raw, ctype, ext = _decode_data_uri(req["audio"])
+                    raw = pad_wav(raw, ctype)               # wan2.7-i2v needs >= 2s of driving audio
                     audio_url = oss_host(raw, ctype, ext)
                 if not audio_url:
                     return self._json(400, {"error": "need 'audio' (base64) or public 'audio_url'"})
