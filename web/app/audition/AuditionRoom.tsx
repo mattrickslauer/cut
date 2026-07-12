@@ -52,9 +52,14 @@ export default function AuditionRoom() {
     engine.initCamera();
 
     const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return; // don't hijack keys while editing the script
       if (e.code === "Space") {
         e.preventDefault();
         engine.manualDone();
+      } else if (e.code === "KeyL") {
+        e.preventDefault();
+        engine.callLine(); // "Line!" — prompt my current line
       }
     };
     window.addEventListener("keydown", onKey);
@@ -157,6 +162,14 @@ export default function AuditionRoom() {
               ■ Stop
             </button>
             <button
+              className={`${styles.btn} ${styles.line}`}
+              disabled={!view.canStop || !view.scripted}
+              onClick={() => engineRef.current?.callLine()}
+              title="Prompt my current line (L)"
+            >
+              🎭 Line! <span className={styles.mono}>(L)</span>
+            </button>
+            <button
               className={`${styles.btn} ${styles.ghost}`}
               disabled={!view.canNewTake}
               onClick={() => engineRef.current?.newTake()}
@@ -195,8 +208,29 @@ export default function AuditionRoom() {
             </div>
             <div className={styles.subtitle}>{view.subtitle}</div>
             <div className={styles.whoSpoke}>{view.whoSpoke}</div>
+            {view.linePrompt && (
+              <div className={styles.linePrompt}>
+                <span className={styles.lpTag}>Line</span>
+                <div className={styles.lpText}>{view.linePrompt}</div>
+              </div>
+            )}
           </div>
           <audio ref={playerRef} hidden />
+          {view.scriptLines.length > 0 && (
+            <div className={styles.teleprompter} aria-label="script follow-along">
+              {view.scriptLines.map((l) => {
+                const cls = [styles.tLine, l.who === "actor" ? styles.tActor : styles.tCostar];
+                if (view.currentLine === l.i) cls.push(styles.tCurrent);
+                else if (view.currentLine > l.i) cls.push(styles.tDone);
+                return (
+                  <div key={l.i} className={cls.join(" ")}>
+                    <span className={styles.tWho}>{l.who === "actor" ? "You" : aiName}</span>
+                    <span className={styles.tText}>{l.text}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {/* RIGHT: transcript + notes */}
