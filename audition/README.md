@@ -112,3 +112,29 @@ cd audition/server && QWEN_API_KEY=sk-xxx PORT=8787 python3 app.py   # BACKEND_U
   reviews. This is the seed of the B2B side.
 - **Per-minute metering** — stamp active talk-time per session for billing (the model discussed).
 - **Webcam** — add `getUserMedia({video})` + record video alongside audio for a real self-tape.
+
+## Scripted practice studio (v2)
+
+When you paste sides into the Next.js app (`../web`), the reader becomes a full scene partner
+you rehearse against — parsed once into speaker-attributed lines that drive four things off one
+current-line pointer:
+
+- **Expressive voice** — the reply model tags each line with an emotion; we translate it into a
+  delivery instruction and voice it with `qwen3-tts-instruct-flash` (falls back to flat
+  `qwen3-tts-flash` if the instruct model isn't on the key). `POST /say` accepts
+  `emotion`/`instructions`/`tone`.
+- **Teleprompter + line-gating** — the sides scroll on screen with the current line highlighted;
+  the co-star only advances once you've delivered your line ("within reason" — fuzzy match), and
+  **"Line!"** (button / `L`) prompts your line when you blank.
+- **Compile a talking-head co-star** *(optional)* — pre-renders the co-star as a real lip-synced
+  face: `POST /portrait` (qwen-image) once, then per line `POST /say` → `POST /avatar` →
+  `GET /avatar?task_id=…`. `/avatar` uses **`wan2.7-i2v`** (the intl route; EMO/s2v are Beijing-only)
+  and hosts each line's WAV on **OSS** (its `driving_audio` must be a public URL). Clips play into
+  the canvas compositor during the take, so the face is baked into the cut — no post-render.
+- **Takes + compare** — every Stop archives the take (video + reader notes + stakes) into a
+  side-by-side compare gallery.
+
+New env (see `server/s.yaml`): `TTS_INSTRUCT_MODEL`, `TTS_EXPRESSIVE`, `PORTRAIT_MODEL`,
+`AVATAR_MODEL`, `AVATAR_RES`, and for the talking-head only `OSS_ENDPOINT` / `OSS_BUCKET` /
+`OSS_KEY_ID` / `OSS_KEY_SECRET`. Leave the OSS vars unset to run everything except the video
+co-star. Talking-head clips are ~1–5 min each and cost real credits — it's opt-in per scene.
