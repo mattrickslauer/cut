@@ -30,7 +30,10 @@ Browser (web/index.html)  — hands-free; camera previews on page load
   Alibaba Function Compute  (cut-audition, custom.debian10, scale-to-zero)
         ├─ qwen3-asr-flash   actor's line → text (+ emotion)         [DashScope, HTTP one-shot]
         ├─ qwen-flash        in-character reply + coaching note       [DashScope, HTTP one-shot]
-        └─ qwen3-tts-flash   voice the reply → OSS audio URL          [DashScope, HTTP one-shot]
+        └─ qwen3-tts-flash   voice the reply → base64 data URI         [DashScope, HTTP one-shot]
+                             (per-role gender-matched voice; base64 so Web Audio can
+                              mix the reader's voice into the recorded tape — OSS URL
+                              has no CORS and would taint/silence in Web Audio)
         ▼
   { heard, line, note, stakes, audio }  → render, play, coach
 ```
@@ -47,8 +50,15 @@ camera/mic capture in Chrome and stalls, so it's **off by default**.)
 ### Latency (measured on the deployed function)
 - Audio path in-region: ASR `qwen3-asr-flash` + reply `qwen-flash` + TTS `qwen3-tts-flash`
   ≈ **~4s** to a voiced reply (co-located with DashScope; negligible cold start).
-- Wins applied: `qwen-flash` (not `qwen-max`); TTS returns the **OSS URL** so the browser
-  streams it (no server re-host); replies kept short.
+- Wins applied: `qwen-flash` (not `qwen-max`); replies kept short. (TTS returns base64 so the
+  reader's voice can be mixed into the recording — costs a ~0.8s re-host, a deliberate trade.)
+
+### Recording — the reader's voice is in the tape
+A persistent Web Audio graph mixes your mic **and** the reader's TTS (via a
+`MediaElementSource` → `MediaStreamDestination`) into the recorded stream, so the Stop
+playback / Save-take file actually contains the spoken lines — not just mic bleed. The
+co-star's lines are also overlaid as captions, synced to the video. Voices are gender-matched
+per role (`qwen3-tts-flash`: Serena/Cherry female, Ethan/Elias male).
 
 ### Why not a streaming WebSocket?
 `research/asr.md` already made this call: a scale-to-zero FC function can't hold a persistent

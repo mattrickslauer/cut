@@ -23,22 +23,22 @@ const SCENES = [
   { id:'diner', title:'The Diner — drama',
     ai_character:'MAYA, an ex who moved on', human_character:'the one who came back',
     premise:'Two former partners collide at a late-night diner a year after a bad breakup. One wants closure; the other has already let go.',
-    tone:'restrained, aching, subtext-heavy', voice:'Cherry',
+    tone:'restrained, aching, subtext-heavy', voice:'Serena',   // mature female
     opening:"I didn't think you still knew this place existed." },
   { id:'heist', title:'The Job — thriller',
     ai_character:'DELACROIX, a nervous crew lead', human_character:'the specialist they hired',
     premise:'Minutes before a job goes live, the crew lead realizes the plan has a hole and confronts the specialist who swore it was airtight.',
-    tone:'tense, clipped, high-stakes', voice:'Ethan',
+    tone:'tense, clipped, high-stakes', voice:'Ethan',          // male
     opening:"Tell me the third floor is handled. Look at me and tell me." },
   { id:'sitcom', title:'Roommates — comedy',
     ai_character:'SAM, an over-caffeinated roommate', human_character:'the exhausted roommate',
     premise:'One roommate has "improved" the apartment with a baffling new system while the other just wants coffee at 7am.',
-    tone:'fast, warm, comedic', voice:'Chelsie',
+    tone:'fast, warm, comedic', voice:'Cherry',                 // bright female
     opening:"Okay before you say anything — the color-coding is going to change your LIFE." },
   { id:'oneword', title:'Cold read — open improv',
     ai_character:'a stranger with a secret', human_character:'yourself',
     premise:'A pure improv two-hander. The AI plays a stranger who clearly knows something you do not. Follow the scene wherever it goes.',
-    tone:'natural, grounded, discovery', voice:'Serena',
+    tone:'natural, grounded, discovery', voice:'Elias',         // measured male
     opening:"You're early. That's either very good or very bad." },
 ];
 
@@ -60,11 +60,27 @@ const S = {
   ring:[], buffer:[], bufLen:0, onset:0, silenceMs:0, speechMs:0, lineMs:0,
   recorder:null, chunks:[], sessionStart:0, timer:0,
   cues:[], recordStart:0, playbackUrl:null,               // co-star caption cues for playback overlay
+  mixDest:null, playerSrc:null,                           // Web Audio: mic + reader voice → recording
 };
 
-// arm a fresh recorder (its own chunks array, so a stopped take can't leak into the next)
+// Persistent audio graph. Created once (createMediaElementSource can bind $.player only
+// once, ever), reused across takes: mic + the reader's TTS voice are mixed into mixDest,
+// whose stream feeds the recorder — so the saved tape actually contains the spoken lines.
+function ensureAudioGraph(){
+  if (S.audioCtx) return;
+  S.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  S.mixDest = S.audioCtx.createMediaStreamDestination();
+  S.playerSrc = S.audioCtx.createMediaElementSource($.player);
+  S.playerSrc.connect(S.mixDest);              // reader voice → recording
+  S.playerSrc.connect(S.audioCtx.destination); // reader voice → speakers
+}
+
+// arm a fresh recorder (its own chunks array, so a stopped take can't leak into the next).
+// Records camera video + the MIXED audio (your mic + the reader's voice), not the raw mic.
 function armRecorder(){
-  const rec = new MediaRecorder(S.stream, pickMime());
+  const audio = S.mixDest ? S.mixDest.stream.getAudioTracks() : S.stream.getAudioTracks();
+  const recStream = new MediaStream([ ...S.stream.getVideoTracks(), ...audio ]);
+  const rec = new MediaRecorder(recStream, pickMime());
   const chunks = [];
   rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
   S.recorder = rec; S.chunks = chunks;
@@ -109,13 +125,14 @@ $.startBtn.onclick = async () => {
       S.stream = await navigator.mediaDevices.getUserMedia(MEDIA);
       $.cam.srcObject = S.stream; $.camOff.style.display = 'none';
     }
-    S.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    ensureAudioGraph();
     if (S.audioCtx.state === 'suspended') await S.audioCtx.resume();
     S.srcRate = S.audioCtx.sampleRate;
     S.source = S.audioCtx.createMediaStreamSource(S.stream);
     S.node = S.audioCtx.createScriptProcessor(4096, 1, 1);
     S.node.onaudioprocess = onAudio;
-    S.source.connect(S.node); S.node.connect(S.audioCtx.destination);   // node emits silence (no echo)
+    S.source.connect(S.node); S.node.connect(S.audioCtx.destination);   // VAD/meter tap (silent)
+    S.source.connect(S.mixDest);                                        // your mic → recording
     $.startBtn.disabled = true; $.stopBtn.disabled = false;
     $.newTakeBtn.disabled = false; $.saveBtn.disabled = false;
     beginTake(true);
@@ -129,9 +146,8 @@ $.stopBtn.onclick = () => {
   clearInterval(S.timer);
   const finish = () => {                                   // runs once the recording is flushed
     try { S.node && S.node.disconnect(); S.source && S.source.disconnect(); } catch(_){}
-    try { S.audioCtx && S.audioCtx.close(); } catch(_){}
     try { S.stream && S.stream.getTracks().forEach(t => t.stop()); } catch(_){}
-    S.stream = S.audioCtx = S.node = S.source = null; S.state = 'idle';
+    S.stream = S.node = S.source = null; S.state = 'idle';  // keep audioCtx/mixDest/playerSrc for next take
     $.subtitle.textContent = ''; $.whoSpoke.textContent = ''; $.meterFill.style.width = '0';
     $.recDot.className = 'rec-dot off';
     if (S.chunks && S.chunks.length){                       // show playback of the take

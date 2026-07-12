@@ -23,7 +23,7 @@ not lag. Cold start only hits the first POST after idle — hidden behind GET /w
 Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
-import os, json, urllib.request, urllib.error
+import os, json, base64, urllib.request, urllib.error
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -108,19 +108,20 @@ def costar_reply(scene, history, actor_line, actor_emotion=None):
 
 
 def synthesize(text, voice=None):
-    """Voice a line via qwen3-tts-flash (synchronous multimodal-generation). Returns
-    something the browser can set as <audio>.src. Fast path: hand back the OSS result
-    URL directly (https-upgraded) so the browser streams it — no server-side fetch or
-    base64 re-host on the critical path. Falls back to a data: URI if only bytes come
-    back. NOTE: the OSS URL expires (~24h); fine for immediate playback."""
+    """Voice a line via qwen3-tts-flash (synchronous multimodal-generation). Returns a
+    same-origin 'data:audio/...;base64,...' URI. We re-host the OSS bytes on purpose: the
+    OSS result URL sends no CORS headers, so the browser can't route it through Web Audio
+    without tainting — and we need it in Web Audio to mix the voice into the recorded tape."""
     out = _post(TTS_SUBMIT, {"model": TTS_MODEL,
                              "input": {"text": text, "voice": voice or TTS_VOICE},
                              "parameters": {}}).get("output", {})
     audio = out.get("audio", {}) or {}
-    if audio.get("url"):                                   # fast path — stream straight from OSS
-        return audio["url"].replace("http://", "https://", 1)
-    if audio.get("data"):                                  # inline base64 fallback
+    if audio.get("data"):                                  # inline base64 (some models)
         return "data:audio/wav;base64," + audio["data"]
+    if audio.get("url"):                                   # fetch + inline the bytes (mixable, no CORS taint)
+        with urllib.request.urlopen(audio["url"], timeout=30) as r:
+            raw, ctype = r.read(), r.headers.get("Content-Type", "audio/wav")
+        return "data:%s;base64,%s" % (ctype, base64.b64encode(raw).decode())
     raise RuntimeError("tts returned no audio: " + json.dumps(out)[:200])
 
 
