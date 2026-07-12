@@ -104,7 +104,7 @@ export default function AuditionRoom() {
 
       <main className={styles.room}>
         {/* LEFT: scene setup */}
-        <section className={styles.panel}>
+        <section className={`${styles.panel} ${styles.setup}`}>
           <div className={styles.panelLabel}>SCENE</div>
           <label className={styles.field}>
             <span>Sides</span>
