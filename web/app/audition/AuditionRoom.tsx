@@ -42,6 +42,7 @@ export default function AuditionRoom() {
   const [setupOpen, setSetupOpen] = useState(false); // scene + script + compile drawer
   const [notesOpen, setNotesOpen] = useState(false); // transcript + reader's notes + takes drawer
   const [view, setView] = useState<AuditionView>(initialView());
+  const [selectedTake, setSelectedTake] = useState<number | null>(null); // take loaded into the main player
 
   useEffect(() => {
     const engine = new AuditionEngine({
@@ -89,6 +90,11 @@ export default function AuditionRoom() {
   const onScript = (t: string) => {
     setScriptText(t);
     engineRef.current?.setScript(t);
+  };
+  // Load an archived take into the main full-screen player for review.
+  const onSelectTake = (id: number, url: string) => {
+    engineRef.current?.playTake(url);
+    setSelectedTake(id);
   };
 
   const pillClass = [styles.pill, styles[view.pillKind as PillKind]].join(" ");
@@ -209,7 +215,10 @@ export default function AuditionRoom() {
             <button
               className={`${styles.round} ${styles.recRound}`}
               disabled={!view.canStart}
-              onClick={() => engineRef.current?.start()}
+              onClick={() => {
+                setSelectedTake(null);
+                engineRef.current?.start();
+              }}
               title="Start audition"
             >
               <span className={styles.recRing} />
@@ -420,12 +429,28 @@ export default function AuditionRoom() {
 
               {view.takes.length > 0 && (
                 <>
-                  <div className={styles.panelLabel} style={{ marginTop: 16 }}>
-                    TAKES <span className={styles.tag}>compare</span>
+                  <div className={styles.takesHead} style={{ marginTop: 16 }}>
+                    <div className={styles.panelLabel} style={{ marginBottom: 0 }}>
+                      TAKES <span className={styles.tag}>compare</span>
+                    </div>
+                    <button
+                      className={`${styles.btn} ${styles.newTake}`}
+                      disabled={view.pillKind === "thinking"}
+                      onClick={() => {
+                        setSelectedTake(null);
+                        engineRef.current?.recordAnother();
+                      }}
+                      title="Record another take"
+                    >
+                      + New take
+                    </button>
                   </div>
                   <div className={styles.takeCol}>
                     {view.takes.map((t) => (
-                      <div key={t.id} className={styles.takeCard}>
+                      <div
+                        key={t.id}
+                        className={`${styles.takeCard} ${selectedTake === t.id ? styles.selected : ""}`}
+                      >
                         <div className={styles.takeHead}>
                           <b>Take {t.n}</b>
                           <div className={styles.stakes}>
@@ -435,6 +460,14 @@ export default function AuditionRoom() {
                           </div>
                         </div>
                         <video className={styles.takeVid} src={t.url} controls playsInline />
+                        <button
+                          className={`${styles.takeUse} ${selectedTake === t.id ? styles.active : ""}`}
+                          disabled={!view.canStart}
+                          onClick={() => onSelectTake(t.id, t.url)}
+                          title="Load this take into the main player"
+                        >
+                          {selectedTake === t.id ? "▶ In main player" : "▶ Play full-screen"}
+                        </button>
                         <div className={styles.takeNotes}>
                           {t.notes.length === 0 ? (
                             <p className={styles.muted}>No notes on this take.</p>
