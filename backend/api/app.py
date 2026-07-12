@@ -245,11 +245,19 @@ def costar_reply(scene, history, actor_line, actor_emotion=None, forced_line=Non
     body = _post(DASHSCOPE_URL, {"model": COSTAR_MODEL, "response_format": {"type": "json_object"},
                                  "max_tokens": 160, "temperature": 0.4 if forced_line else 0.8,
                                  "messages": lines})
-    content = body["choices"][0]["message"]["content"]
+    # content can come back null (filter trip / empty completion) — `or ""` keeps json.loads and the
+    # fallback .strip() on a real string, so a bad beat degrades to a plain line instead of a 500.
+    content = body["choices"][0]["message"].get("content") or ""
     try:
         out = json.loads(content)
-    except json.JSONDecodeError:
-        out = {"line": content.strip()[:200], "emotion": "neutral", "note": "", "stakes": 3}
+    except (json.JSONDecodeError, TypeError):
+        out = None
+    # response_format is json_object, but the model can still hand back a bare JSON string/array (or
+    # null) instead of the object we asked for — coerce anything non-dict to the plain-line shape so
+    # the out[...] assignments below don't blow up ("'str' object does not support item assignment").
+    if not isinstance(out, dict):
+        line = out if isinstance(out, str) else content.strip()[:200]
+        out = {"line": line, "emotion": "neutral", "note": "", "stakes": 3}
     if forced_line:                       # never let a paraphrase through in scripted mode
         out["line"] = forced_line
     out["_usage"] = body.get("usage", {})
