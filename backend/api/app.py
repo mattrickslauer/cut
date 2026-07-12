@@ -245,10 +245,12 @@ def costar_reply(scene, history, actor_line, actor_emotion=None, forced_line=Non
     body = _post(DASHSCOPE_URL, {"model": COSTAR_MODEL, "response_format": {"type": "json_object"},
                                  "max_tokens": 160, "temperature": 0.4 if forced_line else 0.8,
                                  "messages": lines})
-    content = body["choices"][0]["message"]["content"]
+    # content can come back null (filter trip / empty completion) — `or ""` keeps json.loads and the
+    # fallback .strip() on a real string, so a bad beat degrades to a plain line instead of a 500.
+    content = body["choices"][0]["message"].get("content") or ""
     try:
         out = json.loads(content)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         out = {"line": content.strip()[:200], "emotion": "neutral", "note": "", "stakes": 3}
     if forced_line:                       # never let a paraphrase through in scripted mode
         out["line"] = forced_line
