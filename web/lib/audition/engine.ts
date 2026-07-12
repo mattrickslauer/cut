@@ -559,6 +559,55 @@ export class AuditionEngine {
     this.beginTake(false);
   }
 
+  // Full start-over: tear the session down to a clean idle setup — stop recording, drop any take
+  // and archived takes, clear dialogue/notes/stakes/teleprompter — then re-preview the camera.
+  reset() {
+    this.cutPending();
+    try {
+      this.player.pause();
+    } catch {}
+    try {
+      this.playback.pause();
+    } catch {}
+    if (this.timer) clearInterval(this.timer);
+    cancelAnimationFrame(this.rafId);
+    this.rafId = 0;
+    try {
+      if (this.recorder && this.recorder.state !== "inactive") this.recorder.stop();
+    } catch {}
+    try {
+      this.node?.disconnect();
+      this.source?.disconnect();
+    } catch {}
+    try {
+      this.stream?.getTracks().forEach((t) => t.stop());
+    } catch {}
+    this.stream = this.node = this.source = null;
+    this.recorder = null;
+    this.chunks = [];
+    this.history = [];
+    this.take = 1;
+    this.state = "idle";
+    this.scripted = false;
+    this.ptr = 0;
+    if (this.playbackUrl) {
+      URL.revokeObjectURL(this.playbackUrl);
+      this.playbackUrl = null;
+    }
+    this.takes.forEach((t) => {
+      try {
+        URL.revokeObjectURL(t.url);
+      } catch {}
+    });
+    this.takes = [];
+    this.meterFill.style.width = "0";
+    this.view = initialView(); // clean slate for the whole view model
+    this.reparse(); // restore the teleprompter for the sides still in the box
+    this.emit();
+    this.cam.style.display = "";
+    if (!this.stream) this.initCamera(); // re-preview the webcam
+  }
+
   // ---- turn detection (energy-VAD on our own mic stream) ----
   private resetCapture() {
     this.buffer = [];
@@ -624,12 +673,14 @@ export class AuditionEngine {
       const r = await fetch(BACKEND_URL + "/costar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scene: this.sceneForApi(), history: this.history, audio: wav }),
+        // prompt_line lets the reader feed us THIS line if we call "Line!" out loud mid-scene
+        body: JSON.stringify({ scene: this.sceneForApi(), history: this.history, audio: wav, prompt_line: expected }),
         signal: ac.signal,
       });
       const data = await r.json();
       if (gen !== this.gen) return;
       if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
+      if (data.prompt) return this.feedPrompt(data.line || expected, data.audio); // said "Line!" — feed it, hold the pointer
       const heard = (data.heard && data.heard.text) || "";
       const sim = lineSimilarity(heard, expected);
       const ok = !expected || forced || sim >= LINE_MATCH_THRESHOLD || ++this.tries >= 3;
@@ -674,6 +725,15 @@ export class AuditionEngine {
       .then((r) => r.json())
       .then((d) => d && d.audio && new Audio(d.audio).play().catch(() => {}))
       .catch(() => {});
+  }
+
+  // Feed a prompted line to the actor after they say "Line!" out loud (the reader detected the cue
+  // and sent the line back): show it, softly read it through a throwaway <audio> that is NOT wired
+  // into the recording mix, then hand the turn back — the scene pointer doesn't move.
+  private feedPrompt(line: string, audio?: string) {
+    if (line) this.patch({ linePrompt: line });
+    if (audio) new Audio(audio).play().catch(() => {});
+    this.resumeListening();
   }
 
   // ---- compile: pre-render the co-star as a talking-head (portrait + a lip-synced clip per line) ----
@@ -822,6 +882,7 @@ export class AuditionEngine {
       if (gen !== this.gen) return this.removeTurn(thinkingId); // cut while thinking — drop it
       if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
       this.removeTurn(thinkingId);
+      if (data.prompt) return this.feedPrompt(data.line, data.audio); // said "Line!" — suggest a line, don't take a turn
       const heard = (data.heard && data.heard.text) || extra.text || "(unclear)";
       this.addTurn("actor", "You", heard);
       this.history.push({ who: "actor", text: heard });

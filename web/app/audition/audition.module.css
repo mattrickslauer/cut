@@ -229,6 +229,13 @@
   color: var(--muted);
   border: 1px solid var(--line);
 }
+.ghost:not(:disabled):hover {
+  border-color: var(--muted);
+  color: var(--ink);
+}
+.reset {
+  border-style: dashed;
+}
 .hint {
   color: var(--muted);
   margin-top: auto;

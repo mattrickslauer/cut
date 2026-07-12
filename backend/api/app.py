@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-Cut! — Audition Room co-star reader (Alibaba Function Compute web function, scale-to-zero).
+Cut! — unified backend (Alibaba Function Compute web function, scale-to-zero).
 
-Self-contained: its own FC function (cut-audition), stdlib-only, holds the DashScope key
-server-side. Deploys independently of the director's cut-perceive function.
+ONE function (cut-api) serving the whole app: the Audition Room co-star reader AND the
+Director's-eye perception service, merged from the old cut-audition + cut-perceive functions.
+Stdlib-only, holds the DashScope key server-side. (The heavy GPU render pipeline in
+backend/render/ stays separate — it isn't a scale-to-zero function.)
+
+  Director:  GET /background  POST /perceive  POST /transcribe
+  Audition:  GET /warm  GET /avatar  POST /costar  POST /say  POST /portrait  POST /avatar
+  Shared:    GET /health
 
   GET  /health  -> liveness + config sanity
   GET  /warm    -> no-op that spins a cold instance up before an audition starts
@@ -64,6 +70,24 @@ AVATAR_PROMPT = os.environ.get(
 TTS_SUBMIT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 ASR_MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash")
 COSTAR_MODEL = os.environ.get("COSTAR_MODEL", "qwen-flash")  # fastest good reply (~1.5s vs qwen-max ~2.2s)
+# --- Director's-eye perception (folded in from the old cut-perceive function) ---
+# qwen3-vl-flash reads a live performance frame and returns a directorial call; qwen-image paints
+# the empty environment still we composite the performers onto. Both share this one FC function now.
+PERCEPTION_MODEL = os.environ.get("PERCEPTION_MODEL", "qwen3-vl-flash")
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "qwen-image")  # /background environment stills (no people)
+PERCEIVE_SYSTEM = (
+    "You are the PERCEPTION + DIRECTOR module of Cut!, an AI film director watching a "
+    "live improv performance between two people in front of a camera. Given ONE video "
+    "frame, read the moment and make a decisive directorial call. Judge from facial "
+    "expression, body language, and gesture. Respond ONLY as compact json with keys: "
+    "speaker (A|B|both|none), emotion (one word), action (short phrase), "
+    "setting (the fictional location the improv implies, e.g. 'interrogation room'), "
+    "scene_change (boolean: true if this reads as a new scene/location), "
+    "suggested_shot (WIDE|MS|MCU|CU|OTS), "
+    "suggested_look (Neutral|Noir|Sci-Fi|Golden|Thriller — match the mood), "
+    "director_note (a vivid directing call, max 12 words). Be decisive, never hedge. "
+    "Convention: character A is the performer on the LEFT of frame, B is on the RIGHT."
+)
 TTS_MODEL = os.environ.get("TTS_MODEL", "qwen3-tts-flash")  # verified live on the intl Model Studio key
 # Expressive delivery: qwen3-tts-flash IGNORES style — only qwen3-tts-instruct-flash reads a
 # natural-language `instructions` string (no emotion enum; you describe the delivery in words).
@@ -480,6 +504,41 @@ def costar(scene, history, audio_data_url=None, text=None, forced_line=None, pro
             "note": reply.get("note", ""), "stakes": reply.get("stakes"), "audio": spoken}
 
 
+def perceive(image_data_url, prior=None):
+    """The Director's eye: qwen3-vl-flash reads one performance frame and returns a directorial
+    call as JSON (speaker, emotion, shot, look, note). One frame in, one decisive call out."""
+    hint = f" Prior read for continuity: {json.dumps(prior)[:300]}." if prior else ""
+    body = _post(DASHSCOPE_URL, {
+        "model": PERCEPTION_MODEL, "response_format": {"type": "json_object"},
+        "max_tokens": 220, "temperature": 0.4,
+        "messages": [
+            {"role": "system", "content": PERCEIVE_SYSTEM},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Direct this frame. Return json." + hint},
+                {"type": "image_url", "image_url": {"url": image_data_url}}]}]})
+    content = body["choices"][0]["message"]["content"]
+    try:
+        read = json.loads(content)
+    except json.JSONDecodeError:
+        read = {"director_note": content[:120], "_unparsed": True}
+    read["_usage"] = body.get("usage", {})
+    read["_model"] = PERCEPTION_MODEL
+    return read
+
+
+def generate_environment(prompt):
+    """Text -> cinematic 16:9 environment still via qwen-image (async submit + poll). Returns
+    (image_bytes, content_type). Empty world (no people) — we composite the real performers on top."""
+    styled = (prompt or "a cinematic empty stage").strip() + (
+        ", cinematic establishing shot, empty environment, no people, no person, "
+        "atmospheric dramatic lighting, film still, wide angle, photographic")
+    out = _submit_and_poll(IMG_SUBMIT, {"model": IMAGE_MODEL, "input": {"prompt": styled},
+                                        "parameters": {"size": "1280*720", "n": 1}})
+    url = out["results"][0]["url"]
+    with urllib.request.urlopen(url, timeout=30) as r:   # re-host bytes (OSS url expires in 24h)
+        return r.read(), r.headers.get("Content-Type", "image/png")
+
+
 class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -494,6 +553,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _bytes(self, code, data, ctype):
+        self.send_response(code); self._cors()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_OPTIONS(self):
         self.send_response(204); self._cors(); self.end_headers()
 
@@ -502,6 +569,16 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path.rstrip("/")
         if path == "/warm":                        # cheap pre-roll: spins a cold instance up
             return self._json(200, {"warm": True})
+        if path == "/background":                  # director: text -> empty environment still (image bytes)
+            if not API_KEY:
+                return self._json(500, {"error": "QWEN_API_KEY not configured"})
+            q = parse_qs(u.query)
+            prompt = (q.get("prompt", [""])[0] or q.get("q", [""])[0]).strip()
+            try:
+                data, ctype = generate_environment(prompt)
+                return self._bytes(200, data, ctype)
+            except Exception as e:
+                return self._json(502, {"error": str(e)[:200]})
         if path == "/avatar":                      # poll a talking-head task: /avatar?task_id=...
             tid = (parse_qs(u.query).get("task_id") or [""])[0]
             if not tid:
@@ -519,12 +596,13 @@ class Handler(BaseHTTPRequestHandler):
                                     "costar_model": COSTAR_MODEL, "tts_model": TTS_MODEL,
                                     "tts_instruct_model": TTS_INSTRUCT_MODEL,
                                     "expressive": TTS_EXPRESSIVE, "has_key": bool(API_KEY),
-                                    "avatar_model": AVATAR_MODEL, "oss": oss_enabled()})
+                                    "avatar_model": AVATAR_MODEL, "oss": oss_enabled(),
+                                    "perception_model": PERCEPTION_MODEL, "image_model": IMAGE_MODEL})
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        if path not in ("/costar", "/say", "/portrait", "/avatar"):
+        if path not in ("/costar", "/say", "/portrait", "/avatar", "/perceive", "/transcribe"):
             return self._json(404, {"error": "not found"})
         if not API_KEY:
             return self._json(500, {"error": "QWEN_API_KEY not configured"})
@@ -534,6 +612,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json(400, {"error": f"bad request: {e}"})
         try:
+            if path == "/perceive":                        # director's eye: frame -> directorial call
+                if not req.get("image"):
+                    return self._json(400, {"error": "missing 'image'"})
+                return self._json(200, perceive(req["image"], req.get("prior")))
+            if path == "/transcribe":                       # bare ASR (shared): audio -> text + emotion
+                if not req.get("audio"):
+                    return self._json(400, {"error": "missing 'audio'"})
+                return self._json(200, transcribe(req["audio"], req.get("language", "en")))
             if path == "/say":                             # voice arbitrary text (e.g. the opening line)
                 if not req.get("text"):
                     return self._json(400, {"error": "missing 'text'"})
@@ -574,5 +660,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("FC_SERVER_PORT") or os.environ.get("PORT") or 9000)
-    print(f"cut audition co-star on :{port}  reader={COSTAR_MODEL}  tts={TTS_MODEL}  key={'set' if API_KEY else 'MISSING'}")
+    print(f"cut-api on :{port}  reader={COSTAR_MODEL}  tts={TTS_MODEL}  eye={PERCEPTION_MODEL}  key={'set' if API_KEY else 'MISSING'}")
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
