@@ -40,6 +40,18 @@
   align-items: center;
   gap: 8px;
 }
+.navBadge {
+  margin-right: 4px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--accent-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 176, 46, 0.07);
+  white-space: nowrap;
+}
 .navLink {
   padding: 8px 12px;
   font-size: 14px;
@@ -64,6 +76,11 @@
 .navCta:hover {
   border-color: var(--accent);
   background: rgba(255, 77, 61, 0.1);
+}
+@media (max-width: 860px) {
+  .navBadge {
+    display: none;
+  }
 }
 @media (max-width: 640px) {
   .navLink {
@@ -321,6 +338,16 @@
   letter-spacing: 1px;
   color: var(--muted);
 }
+.mockModel {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--accent-2);
+  border: 1px solid rgba(255, 176, 46, 0.3);
+  border-radius: 6px;
+  padding: 2px 7px;
+}
 .mockViewport {
   position: relative;
   aspect-ratio: 16 / 10;
@@ -477,6 +504,18 @@
   border-color: var(--accent);
   transform: translateY(-2px);
 }
+.whyTag {
+  display: inline-block;
+  margin-bottom: 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  font-weight: 700;
+  color: var(--accent);
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: rgba(255, 77, 61, 0.12);
+}
 .whyCard h3 {
   margin: 0 0 10px;
   font-size: 18px;
@@ -534,4 +573,140 @@
   font-size: 16px;
   font-weight: 700;
   color: var(--text);
+}
+
+/* ── Powered by Qwen — the model stack ───────────────────── */
+.stack {
+  padding: 40px 0 8px;
+}
+.stackHead {
+  text-align: center;
+  max-width: 640px;
+  margin: 0 auto 32px;
+}
+.stackKicker {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 2.5px;
+  font-weight: 700;
+  color: var(--accent-2);
+}
+.stackLede {
+  margin: 12px 0 0;
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.stackGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+@media (max-width: 860px) {
+  .stackGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .stackGrid {
+    grid-template-columns: 1fr;
+  }
+}
+.stackCard {
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--panel), #0e1114);
+  transition: border-color 0.15s, transform 0.15s;
+}
+.stackCard:hover {
+  border-color: var(--accent-2);
+  transform: translateY(-2px);
+}
+.stackModel {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  font-weight: 700;
+  color: var(--accent-2);
+  border: 1px solid rgba(255, 176, 46, 0.28);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.stackCard h3 {
+  margin: 14px 0 8px;
+  font-size: 17px;
+}
+.stackCard p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+/* ── Under the hood — the live loop ──────────────────────── */
+.arch {
+  padding: 64px 0;
+  border-top: 1px solid var(--line);
+}
+.archLede {
+  text-align: center;
+  max-width: 640px;
+  margin: -20px auto 40px;
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.archFlow {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+@media (max-width: 860px) {
+  .archFlow {
+    flex-direction: column;
+    align-items: center;
+  }
+}
+.archNode {
+  flex: 1;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  text-align: center;
+}
+@media (max-width: 860px) {
+  .archNode {
+    width: 100%;
+    max-width: 420px;
+  }
+}
+.archStep {
+  display: inline-block;
+  margin-bottom: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.archNode p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.archArrow {
+  align-self: center;
+  font-size: 22px;
+  color: var(--accent-2);
+  flex: 0 0 auto;
+}
+@media (max-width: 860px) {
+  .archArrow {
+    transform: rotate(90deg);
+  }
 }
