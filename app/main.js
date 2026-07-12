@@ -3,8 +3,9 @@
 
 import { GLCompositor, LAYERS } from './composite_gl.js';
 
-// Alibaba Function Compute perception service (scale-to-zero). Holds the DashScope key.
-const BACKEND_URL = 'https://cut-perceive-xfdwmitvbk.ap-southeast-1.fcapp.run';
+// Alibaba Function Compute backend (scale-to-zero). Holds the DashScope key. This is the unified
+// cut-api function — perceive/transcribe/background live here now (the old cut-perceive was merged in).
+const BACKEND_URL = 'https://cut-api-rjnhudrcgv.ap-southeast-1.fcapp.run';
 const PERCEIVE_MS = 4000; // how often the director "looks" while a session rolls
 
 const els = {
