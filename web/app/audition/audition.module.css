@@ -101,6 +101,11 @@
   flex-direction: column;
   min-height: 0;
 }
+/* the left setup column can be taller than the viewport (scene card + sides + compile +
+   controls + hint) — let it scroll on its own instead of clipping against the fixed grid */
+.setup {
+  overflow-y: auto;
+}
 .panelLabel {
   font-size: 11px;
   letter-spacing: 0.14em;
