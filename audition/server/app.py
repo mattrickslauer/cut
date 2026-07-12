@@ -20,9 +20,10 @@ server-side. Deploys independently of the director's cut-perceive function.
   POST /portrait-> { character, tone? } -> { image, image_url } : a head-and-shoulders
                    portrait of the co-star (qwen-image), framed for talking-head animation.
                    First half of the scripted "compile" pass (avatar video is the second).
-  POST /avatar  -> { image, audio_url, prompt?, duration? } -> { task_id } : submit an
+  POST /avatar  -> { image, audio|audio_url, prompt?, duration? } -> { task_id } : submit an
                    audio-driven talking-head video (wan2.7-i2v) — portrait as first frame,
-                   the line's audio (a PUBLIC url) as the lip-sync driver. Minutes-scale.
+                   the line's audio as the lip-sync driver. Pass base64 `audio` and it's hosted
+                   on OSS (wan needs a public url); or pass your own `audio_url`. Minutes-scale.
   GET  /avatar?task_id=... -> { status, video?, error? } : poll it; video is an inlined mp4.
 
 WHY TURN-BASED HTTP (not a streaming WebSocket): a scale-to-zero FC function can't hold a
@@ -34,8 +35,9 @@ not lag. Cold start only hits the first POST after idle — hidden behind GET /w
 Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
-import os, json, base64, time, urllib.request, urllib.error
-from urllib.parse import urlparse, parse_qs
+import os, json, base64, time, hmac, hashlib, urllib.request, urllib.error
+from email.utils import formatdate
+from urllib.parse import urlparse, parse_qs, quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DASHSCOPE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -71,6 +73,15 @@ TTS_EXPRESSIVE = os.environ.get("TTS_EXPRESSIVE", "1").strip() not in ("0", "fal
 TTS_VOICE = os.environ.get("TTS_VOICE", "Cherry")  # per-character voice overrides this
 TTS_LANG = os.environ.get("TTS_LANG", "English")   # nudge qwen3-tts-flash toward natural English prosody
 API_KEY = os.environ.get("QWEN_API_KEY", "").strip().strip('"').strip("'")
+
+# Alibaba OSS — where a co-star line's TTS WAV is hosted so wan2.7-i2v can fetch it (it requires a
+# public url for driving_audio; base64 isn't accepted). We PUT the bytes then hand out a presigned
+# GET url, so it works whether or not the bucket allows public-read. Stdlib OSS V1 signing.
+OSS_ENDPOINT = os.environ.get("OSS_ENDPOINT", "oss-ap-southeast-1.aliyuncs.com")  # match your DashScope region
+OSS_BUCKET = os.environ.get("OSS_BUCKET", "").strip()
+OSS_KEY_ID = os.environ.get("OSS_KEY_ID", "").strip()
+OSS_KEY_SECRET = os.environ.get("OSS_KEY_SECRET", "").strip()
+OSS_PREFIX = os.environ.get("OSS_PREFIX", "cut-audition/")
 
 # One-word emotion labels (from the co-star reply model) → concrete vocal-delivery instructions.
 # The docs are explicit: describe pitch/pace/emphasis, not vague mood words. Unknown labels fall
@@ -292,6 +303,46 @@ def generate_portrait(character, tone=None):
     return {"image": _rehost(url), "image_url": url}
 
 
+def _decode_data_uri(uri):
+    """'data:audio/wav;base64,AAAA' -> (raw_bytes, content_type, ext)."""
+    head, _, b64 = (uri or "").partition(",")
+    ctype = "application/octet-stream"
+    if head.startswith("data:"):
+        ctype = head[5:].split(";")[0] or ctype
+    ext = {"audio/wav": "wav", "audio/x-wav": "wav", "audio/mpeg": "mp3", "audio/mp3": "mp3",
+           "image/png": "png", "image/jpeg": "jpg"}.get(ctype, "bin")
+    return base64.b64decode(b64), ctype, ext
+
+
+def oss_enabled():
+    return bool(OSS_BUCKET and OSS_KEY_ID and OSS_KEY_SECRET)
+
+
+def _oss_sign(string_to_sign):
+    return base64.b64encode(
+        hmac.new(OSS_KEY_SECRET.encode(), string_to_sign.encode(), hashlib.sha1).digest()
+    ).decode()
+
+
+def oss_host(raw, content_type, ext, ttl=7200):
+    """PUT bytes to OSS (key = content hash, so identical audio de-dupes) and return a presigned
+    GET url valid `ttl` seconds — long enough for the minutes-scale video task to fetch it."""
+    if not oss_enabled():
+        raise RuntimeError("OSS not configured — set OSS_BUCKET / OSS_KEY_ID / OSS_KEY_SECRET")
+    key = OSS_PREFIX + hashlib.sha1(raw).hexdigest() + "." + ext
+    host = f"{OSS_BUCKET}.{OSS_ENDPOINT}"
+    date = formatdate(usegmt=True)
+    put = urllib.request.Request(
+        f"https://{host}/{key}", data=raw, method="PUT",
+        headers={"Authorization": f"OSS {OSS_KEY_ID}:{_oss_sign(f'PUT\n\n{content_type}\n{date}\n/{OSS_BUCKET}/{key}')}",
+                 "Date": date, "Content-Type": content_type, "Host": host})
+    with urllib.request.urlopen(put, timeout=60) as r:
+        r.read()
+    expires = int(time.time()) + ttl
+    sig = quote(_oss_sign(f"GET\n\n\n{expires}\n/{OSS_BUCKET}/{key}"), safe="")
+    return f"https://{host}/{key}?OSSAccessKeyId={OSS_KEY_ID}&Expires={expires}&Signature={sig}"
+
+
 def submit_avatar(image, audio_url, prompt=None, duration=None):
     """Kick off an audio-driven talking-head video (wan2.7-i2v): the portrait as the first frame,
     the co-star line's audio as the lip-sync driver. Returns a task_id — the browser polls it.
@@ -381,7 +432,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "asr_model": ASR_MODEL,
                                     "costar_model": COSTAR_MODEL, "tts_model": TTS_MODEL,
                                     "tts_instruct_model": TTS_INSTRUCT_MODEL,
-                                    "expressive": TTS_EXPRESSIVE, "has_key": bool(API_KEY)})
+                                    "expressive": TTS_EXPRESSIVE, "has_key": bool(API_KEY),
+                                    "avatar_model": AVATAR_MODEL, "oss": oss_enabled()})
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -408,9 +460,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": "missing 'character'"})
                 return self._json(200, generate_portrait(req["character"], req.get("tone")))
             if path == "/avatar":                          # submit a talking-head video → { task_id }
-                if not req.get("image") or not req.get("audio_url"):
-                    return self._json(400, {"error": "need 'image' (base64/url) and public 'audio_url'"})
-                tid = submit_avatar(req["image"], req["audio_url"], req.get("prompt"), req.get("duration"))
+                if not req.get("image"):
+                    return self._json(400, {"error": "missing 'image'"})
+                audio_url = req.get("audio_url")
+                if not audio_url and req.get("audio"):      # base64 WAV → host on OSS → public url
+                    raw, ctype, ext = _decode_data_uri(req["audio"])
+                    audio_url = oss_host(raw, ctype, ext)
+                if not audio_url:
+                    return self._json(400, {"error": "need 'audio' (base64) or public 'audio_url'"})
+                tid = submit_avatar(req["image"], audio_url, req.get("prompt"), req.get("duration"))
                 return self._json(202, {"task_id": tid})
             if not req.get("audio") and not req.get("text"):
                 return self._json(400, {"error": "missing 'audio' or 'text'"})
