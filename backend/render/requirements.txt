@@ -1,0 +1,9 @@
+# Cut! render service (GPU box). ffmpeg + ffprobe must be on PATH (system install).
+#
+# The composite / camera / grade / assemble path needs only numpy + OpenCV, and
+# runs on CPU (see `python -m render.cli selfcheck` / --fake). torch is required
+# only for the real RVM matte and wants a CUDA GPU for real-time speed.
+numpy>=1.24
+opencv-python>=4.8            # use opencv-python-headless on a server without a display
+torch>=2.1                    # RVM; install the CUDA build matching your driver
+torchvision>=0.16            # torch.hub.load pulls RVM weights on first run
