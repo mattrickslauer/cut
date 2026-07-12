@@ -165,6 +165,51 @@ button.ghost:hover:not(:disabled) { background: var(--panel-2); }
 .transcript .who { font-weight: 700; margin-right: 6px; }
 .transcript .who.A { color: #ffb02e; } .transcript .who.B { color: #3ec6ff; } .transcript .who.x { color: var(--muted); }
 
+/* Inspect layers modal */
+.modal {
+  position: fixed; inset: 0; z-index: 50; display: none;
+  align-items: center; justify-content: center;
+  background: rgba(4, 6, 9, .72); backdrop-filter: blur(3px);
+}
+.modal.show { display: flex; }
+.modal-box {
+  width: min(1180px, 94vw); max-height: 92vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .6); overflow: hidden;
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #161b21, #12161b);
+}
+.modal-head h2 { margin: 0; font-size: 14px; letter-spacing: 1px; }
+.ins-hint {
+  margin: 0; padding: 10px 18px; font-size: 12px; color: var(--accent-2);
+  background: #241d10; border-bottom: 1px solid var(--line);
+}
+.modal-body {
+  display: grid; grid-template-columns: 1fr 260px; gap: 16px;
+  padding: 16px 18px; overflow: auto; min-height: 0;
+}
+.ins-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px; align-content: start;
+}
+.ins-card { background: #000; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.ins-card canvas { width: 100%; height: auto; display: block; background: #05070a; }
+.ins-cap {
+  padding: 6px 8px; font-size: 11px; letter-spacing: .5px; color: var(--muted);
+  border-top: 1px solid var(--line); background: var(--panel-2);
+}
+.ins-panel {
+  display: flex; flex-direction: column; gap: 14px; align-content: start;
+  padding: 4px 2px;
+}
+.ins-slider { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; font-size: 12px; }
+.ins-slider > span:first-child { color: var(--muted); }
+.ins-slider .ins-val { font-family: ui-monospace, Menlo, monospace; color: var(--text); font-size: 11px; }
+.ins-slider input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+
 /* Live subtitle on the cut */
 .subtitle {
   position: absolute; left: 6%; right: 6%; bottom: 13%; text-align: center; pointer-events: none;
