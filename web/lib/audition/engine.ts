@@ -71,6 +71,8 @@ export type AuditionView = {
   compiled: boolean;
   compileProgress: number;
   compileTotal: number;
+  // archived takes for side-by-side compare (newest first)
+  takes: { id: number; n: number; title: string; url: string; notes: Note[]; stakes: number; lineCount: number }[];
 };
 
 export function initialView(): AuditionView {
@@ -101,11 +103,22 @@ export function initialView(): AuditionView {
     compiled: false,
     compileProgress: 0,
     compileTotal: 0,
+    takes: [],
   };
 }
 
 type Cue = { t: number; end: number; text: string; who: string };
 type HistoryItem = { who: "actor" | "costar"; text: string };
+type TakeRecord = {
+  id: number;
+  n: number;
+  title: string;
+  url: string; // own blob URL, held until dispose() (not the shared playback URL)
+  dialogue: Turn[];
+  notes: Note[];
+  stakes: number;
+  cues: Cue[];
+};
 
 export class AuditionEngine {
   private cam: HTMLVideoElement;
@@ -168,6 +181,7 @@ export class AuditionEngine {
   private clipActive = false; // drawFrame paints the talking-head clip instead of the text card
   private costarVideo!: HTMLVideoElement; // reusable element the clips play through
   private costarSrc: MediaElementAudioSourceNode | null = null; // its audio, routed into the mix
+  private takes: TakeRecord[] = []; // archived takes for compare, each with its own retained blob URL
 
   constructor(opts: {
     cam: HTMLVideoElement;
@@ -477,6 +491,7 @@ export class AuditionEngine {
           canSave: true,
         });
         this.playback.play().catch(() => {});
+        this.archiveTake(); // keep it for side-by-side compare
       } else {
         this.cam.srcObject = null;
         this.patch({ camOff: true });
@@ -908,6 +923,35 @@ export class AuditionEngine {
     this.patch({ stakes: v });
   }
 
+  // ---- takes archive (compare) ----
+  // Keep this take for side-by-side compare: its own blob URL (the shared playback URL gets revoked
+  // on the next Stop) plus the dialogue, reader notes, stakes, and caption cues it earned.
+  private archiveTake() {
+    const url = URL.createObjectURL(new Blob(this.chunks, { type: "video/webm" }));
+    const rec: TakeRecord = {
+      id: this.uid++,
+      n: this.takes.length + 1,
+      title: this.scene.title,
+      url,
+      dialogue: [...this.view.dialogue],
+      notes: [...this.view.notes],
+      stakes: this.view.stakes,
+      cues: [...this.cues],
+    };
+    this.takes = [rec, ...this.takes]; // newest first
+    this.patch({
+      takes: this.takes.map((t) => ({
+        id: t.id,
+        n: t.n,
+        title: t.title,
+        url: t.url,
+        notes: t.notes,
+        stakes: t.stakes,
+        lineCount: t.dialogue.length,
+      })),
+    });
+  }
+
   // ---- save take ----
   save() {
     const stop = () =>
@@ -973,5 +1017,10 @@ export class AuditionEngine {
       this.audioCtx?.close();
     } catch {}
     if (this.playbackUrl) URL.revokeObjectURL(this.playbackUrl);
+    this.takes.forEach((t) => {
+      try {
+        URL.revokeObjectURL(t.url);
+      } catch {}
+    });
   }
 }

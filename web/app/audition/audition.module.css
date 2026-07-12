@@ -594,3 +594,46 @@
   background: linear-gradient(90deg, var(--ember), var(--ember-2));
   transition: width 0.4s ease;
 }
+
+/* takes — record several, compare side by side with their notes */
+.takes {
+  margin: 0 18px 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.takeRow {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding: 10px 2px 4px;
+}
+.takeCard {
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.takeHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.takeVid {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  background: #000;
+}
+.takeNotes {
+  max-height: 22vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

@@ -298,6 +298,41 @@ export default function AuditionRoom() {
           </div>
         </section>
       </main>
+
+      {view.takes.length > 0 && (
+        <section className={styles.takes}>
+          <div className={styles.panelLabel}>
+            TAKES <span className={styles.tag}>compare</span>
+          </div>
+          <div className={styles.takeRow}>
+            {view.takes.map((t) => (
+              <div key={t.id} className={styles.takeCard}>
+                <div className={styles.takeHead}>
+                  <b>Take {t.n}</b>
+                  <div className={styles.stakes}>
+                    {[0, 1, 2, 3, 4].map((ix) => (
+                      <i key={ix} className={ix < t.stakes ? styles.on : ""} />
+                    ))}
+                  </div>
+                </div>
+                <video className={styles.takeVid} src={t.url} controls playsInline />
+                <div className={styles.takeNotes}>
+                  {t.notes.length === 0 ? (
+                    <p className={styles.muted}>No notes on this take.</p>
+                  ) : (
+                    t.notes.map((n) => (
+                      <div key={n.id} className={styles.note}>
+                        <div className={styles.nLine}>&ldquo;{n.line}&rdquo;</div>
+                        <div>{n.note}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
