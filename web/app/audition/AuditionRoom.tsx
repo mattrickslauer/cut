@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { AuditionEngine, initialView, type AuditionView, type PillKind } from "@/lib/audition/engine";
 import { SCENES } from "@/lib/audition/scenes";
+import SceneCarousel from "./SceneCarousel";
 import styles from "./audition.module.css";
 
 function PillContent({ view, aiName }: { view: AuditionView; aiName: string }) {
@@ -36,7 +37,8 @@ export default function AuditionRoom() {
   const engineRef = useRef<AuditionEngine | null>(null);
 
   const [sceneIndex, setSceneIndex] = useState(0);
-  const [scriptText, setScriptText] = useState("");
+  const [scriptText, setScriptText] = useState(SCENES[0].sides ?? "");
+  const [pickerOpen, setPickerOpen] = useState(true); // greet with the scene library
   const [view, setView] = useState<AuditionView>(initialView());
 
   useEffect(() => {
@@ -50,6 +52,7 @@ export default function AuditionRoom() {
     });
     engineRef.current = engine;
     engine.initCamera();
+    engine.loadScene(SCENES[0]); // pull in the opening scene's baked-in sides + any pre-rendered co-star
 
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -73,9 +76,13 @@ export default function AuditionRoom() {
   const scene = SCENES[sceneIndex];
   const aiName = scene.ai_character.split(",")[0];
 
-  const onScene = (i: number) => {
+  // Pick a scene from the library carousel: load it whole (swaps sides + binds the pre-rendered
+  // co-star), mirror its sides into the editable textarea, and close the picker.
+  const onPick = (i: number) => {
     setSceneIndex(i);
-    engineRef.current?.setScene(SCENES[i]);
+    setScriptText(SCENES[i].sides ?? "");
+    engineRef.current?.loadScene(SCENES[i]);
+    setPickerOpen(false);
   };
   const onScript = (t: string) => {
     setScriptText(t);
@@ -106,21 +113,19 @@ export default function AuditionRoom() {
         {/* LEFT: scene setup */}
         <section className={styles.panel}>
           <div className={styles.panelLabel}>SCENE</div>
-          <label className={styles.field}>
-            <span>Sides</span>
-            <select
-              className={styles.select}
-              value={sceneIndex}
-              onChange={(e) => onScene(Number(e.target.value))}
-            >
-              {SCENES.map((s, i) => (
-                <option key={s.id} value={i}>
-                  {s.title}
-                </option>
-              ))}
-            </select>
-          </label>
+          <button className={styles.browseBtn} onClick={() => setPickerOpen(true)}>
+            🎞️ Browse scene library
+          </button>
           <div className={styles.sceneCard}>
+            <div className={styles.sceneTitleRow}>
+              <b className={styles.sceneName}>{scene.title}</b>
+              {scene.film && (
+                <span className={styles.sceneFilm}>
+                  {scene.film}
+                  {scene.year ? ` · ${scene.year}` : ""}
+                </span>
+              )}
+            </div>
             <div className={styles.sceneRow}>
               <b>You play</b>
               <span>{scene.human_character}</span>
@@ -146,7 +151,15 @@ export default function AuditionRoom() {
               placeholder="Paste the sides — the co-star follows its lines. Leave blank to improvise from the premise."
             />
           </label>
-          {(view.canCompile || view.compiling || view.compiled) && (
+          {view.prerendered ? (
+            <div className={styles.compileWrap}>
+              <div className={styles.preReady}>✓ Pre-rendered co-star ready — just press Start</div>
+              <p className={`${styles.hint} ${styles.mono}`}>
+                This scene ships a filmed scene partner (a portrait + one lip-synced clip per line),
+                so it performs as a real face instantly. Edit the sides to re-film your own.
+              </p>
+            </div>
+          ) : (view.canCompile || view.compiling || view.compiled) && (
             <div className={styles.compileWrap}>
               <button
                 className={`${styles.btn} ${styles.compile}`}
@@ -332,6 +345,15 @@ export default function AuditionRoom() {
             ))}
           </div>
         </section>
+      )}
+
+      {pickerOpen && (
+        <SceneCarousel
+          scenes={SCENES}
+          index={sceneIndex}
+          onSelect={onPick}
+          onClose={() => setPickerOpen(false)}
+        />
       )}
     </div>
   );
