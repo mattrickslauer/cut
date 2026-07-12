@@ -156,6 +156,9 @@ export class AuditionEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cues: Cue[] = [];
   private recordStart = 0;
+  // true while a "Line!" prompt is being fed: pause the tape through the blank + whisper + regather
+  // so "asking for a line" is cut out. Cleared on the actor's next speech onset (delivery resumes).
+  private prompting = false;
   private playbackUrl: string | null = null;
   private mixDest: MediaStreamAudioDestinationNode | null = null;
   private playerSrc: MediaElementAudioSourceNode | null = null;
@@ -417,17 +420,22 @@ export class AuditionEngine {
       pillOverride: null,
       recOn: st !== "idle",
     });
-    // edit out the AI's latency: don't record the "thinking" gap into the tape
-    if (this.recorder) {
-      if (st === "thinking" && this.recorder.state === "recording") {
-        try {
-          this.recorder.pause();
-        } catch {}
-      } else if (st !== "thinking" && this.recorder.state === "paused") {
-        try {
-          this.recorder.resume();
-        } catch {}
-      }
+    this.syncRecorder();
+  }
+
+  // Pause the tape during dead time so it never lands in the take: the AI's "thinking" latency, and
+  // the "asking for a line" gap while a "Line!" prompt is fed. Resume once we're back to real action.
+  private syncRecorder() {
+    if (!this.recorder) return;
+    const shouldPause = this.state === "thinking" || this.prompting;
+    if (shouldPause && this.recorder.state === "recording") {
+      try {
+        this.recorder.pause();
+      } catch {}
+    } else if (!shouldPause && this.recorder.state === "paused") {
+      try {
+        this.recorder.resume();
+      } catch {}
     }
   }
 
@@ -480,6 +488,7 @@ export class AuditionEngine {
   // and unhook onended so finished playback can't re-arm the mic.
   private cutPending() {
     this.gen++;
+    this.prompting = false; // a Cut / fresh take clears any pending "Line!" tape-pause
     try {
       this.inflight?.abort();
     } catch {}
@@ -780,11 +789,17 @@ export class AuditionEngine {
     this.state = "listening"; // linger / improv on; Stop makes the cut. finishLine falls to runTurn.
   }
 
-  // "Line!" — surface the actor's current expected line (and softly read it) when they blank. The
-  // prompt is spoken through a throwaway element, NOT the recorded mix, so it stays out of the take.
+  // "Line!" — surface the actor's current expected line (and softly read it) when they blank. Only
+  // on the actor's own turn. The prompt is spoken through a throwaway element, NOT the recorded mix,
+  // and we pause the tape here (re-arming capture) so the blank + whisper + regather is cut from the
+  // take; recording resumes on your next word.
   callLine() {
+    if (this.state !== "listening" && this.state !== "hearing") return;
     const line = this.expectedActorLine();
     if (!line) return;
+    this.prompting = true;
+    this.resetCapture(); // drop any half-spoken line; you'll restart it after the prompt
+    this.setState("listening"); // syncRecorder pauses the tape while prompting
     this.patch({ linePrompt: line });
     fetch(BACKEND_URL + "/say", {
       method: "POST",
@@ -802,7 +817,8 @@ export class AuditionEngine {
   private feedPrompt(line: string, audio?: string) {
     if (line) this.patch({ linePrompt: line });
     if (audio) new Audio(audio).play().catch(() => {});
-    this.resumeListening();
+    this.prompting = true; // hold the tape paused through the whisper + regather
+    this.resumeListening(); // setState("listening") → syncRecorder keeps it paused until you speak
   }
 
   // ---- compile: pre-render the co-star as a talking-head (portrait + a lip-synced clip per line) ----
@@ -926,6 +942,7 @@ export class AuditionEngine {
     if (this.state === "listening") {
       if (rms > START_RMS) {
         if (++this.onset >= ONSET_BLK) {
+          this.prompting = false; // you're delivering again — end the "asking for a line" cut
           this.setState("hearing");
           this.buffer = this.ring.slice();
           this.bufLen = this.buffer.reduce((n, b) => n + b.length, 0);
