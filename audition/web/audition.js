@@ -11,9 +11,13 @@
 //
 // State machine:  LISTENING → HEARING(you talk) → THINKING(POST /costar) → SPEAKING(reply) → LISTENING
 
-// Deployed cut-audition FC function (scale-to-zero, ap-southeast-1). For local dev,
-// swap to 'http://localhost:8787' and run audition/server/app.py.
-const BACKEND_URL = 'https://cut-audition-htjhmbyvbv.ap-southeast-1.fcapp.run';
+// Deployed cut-audition FC function (scale-to-zero, ap-southeast-1). When the page is opened on
+// localhost we hit a local server instead, so `QWEN_API_KEY=... PORT=8787 python3 app.py` + a
+// static server is all it takes to test backend changes before they're deployed. Override with
+// ?backend=... in the URL if your local server is on another port/host.
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+const BACKEND_URL = new URLSearchParams(location.search).get('backend')
+  || (LOCAL_HOST ? `http://${location.hostname}:8787` : 'https://cut-audition-htjhmbyvbv.ap-southeast-1.fcapp.run');
 const ASR_RATE = 16000;        // qwen3-asr-flash wants 16 kHz mono (see research/asr.md)
 const START_RMS = 0.020;       // onset threshold (enter HEARING) — low enough for quiet mics
 const END_RMS   = 0.011;       // below this counts as silence (hysteresis vs START)
