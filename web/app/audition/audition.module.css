@@ -1,9 +1,10 @@
-/* Cut! — Audition Room. Video-hero, hands-free. Scoped CSS module; theme tokens come from globals.css. */
+/* Cut! — Audition Room. Full-screen self-tape: camera fills the frame, everything else floats
+   on top as overlays. Scoped CSS module; theme tokens come from globals.css. */
 .page {
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
+  position: fixed;
+  inset: 0;
   overflow: hidden;
+  background: #000;
 }
 .mono {
   font-family: var(--mono);
@@ -12,48 +13,114 @@
 .muted {
   color: var(--muted);
 }
+.clap {
+  font-size: 17px;
+  line-height: 1;
+}
 
-.topbar {
+/* ===== full-screen camera stage ===== */
+.stageFull {
+  position: absolute;
+  inset: 0;
+  background: #000;
+}
+.tapLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 1; /* above the video, below every HUD overlay */
+}
+
+/* ===== compact top HUD ===== */
+.hudTop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 14px 22px;
-  border-bottom: 1px solid var(--line);
-  background: #0e1015;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.clap {
-  font-size: 26px;
-}
-.brand h1 {
-  font-size: 19px;
-  margin: 0;
-  font-weight: 700;
-  display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 10px;
+  padding: 12px 14px;
+  pointer-events: none; /* let the empty middle pass taps through to the frame */
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
 }
-.brand h1 .sub {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--muted);
-}
-.home {
-  color: var(--muted);
-  text-decoration: none;
-  font-size: 13px;
-}
-.home:hover {
-  color: var(--ink, var(--text));
-}
-.session {
+.hudLeft,
+.hudRight {
   display: flex;
   align-items: center;
   gap: 8px;
+  pointer-events: auto;
+}
+.homeChip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  font-size: 17px;
+  color: var(--text);
+  text-decoration: none;
+  background: rgba(14, 16, 21, 0.72);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.homeChip:hover {
+  border-color: var(--ember-2);
+}
+.sceneChip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: 62vw;
+  font: inherit;
+  color: var(--text);
+  background: rgba(14, 16, 21, 0.72);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 11px;
+  height: 34px;
+  cursor: pointer;
+}
+.sceneChip:hover {
+  border-color: var(--ember-2);
+}
+.sceneChipText {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+.sceneChipText b {
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sceneChipText em {
+  font: 10px var(--mono);
+  font-style: normal;
+  color: var(--ember-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chev {
+  font-size: 10px;
+  color: var(--muted);
+  flex: none;
+}
+.hudRight {
+  padding: 7px 11px;
+  height: 34px;
+  background: rgba(14, 16, 21, 0.72);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  border-radius: 10px;
 }
 .recDot {
   width: 10px;
@@ -77,34 +144,215 @@
   }
 }
 
-.room {
-  display: grid;
-  grid-template-columns: 290px 1fr 320px;
-  gap: 16px;
-  padding: 16px;
-  flex: 1;
-  min-height: 0;
+/* ===== control dock — all transport in one floating overlay ===== */
+.dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  padding: 14px 12px calc(14px + env(safe-area-inset-bottom, 0px));
+  pointer-events: none;
 }
-@media (max-width: 1050px) {
-  .room {
-    grid-template-columns: 1fr;
-    height: auto;
-    overflow: auto;
+.dockBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: rgba(12, 14, 20, 0.82);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--line);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+  overflow-x: auto;
+}
+.round {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 0;
+  cursor: pointer;
+  font-size: 18px;
+  transition: transform 0.05s ease, filter 0.15s ease;
+}
+.round:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.round:not(:disabled):active {
+  transform: scale(0.94);
+}
+.recRound {
+  background: #fff;
+  border: 3px solid rgba(255, 255, 255, 0.4);
+}
+.recRing {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--ember);
+}
+.recRound:not(:disabled):hover .recRing {
+  filter: brightness(1.1);
+}
+.stopRound {
+  background: var(--ember);
+  color: #1a0f08;
+  font-size: 16px;
+  border: 3px solid rgba(255, 106, 61, 0.4);
+  animation: pulse 1.3s infinite;
+}
+.pillBtn {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 10px 13px;
+  height: 44px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s, transform 0.05s;
+}
+.pillBtn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.pillBtn:not(:disabled):hover {
+  border-color: var(--muted);
+  background: rgba(255, 255, 255, 0.1);
+}
+.pillBtn:not(:disabled):active {
+  transform: translateY(1px);
+}
+.pillOn {
+  border-color: var(--ember-2);
+  background: rgba(255, 176, 86, 0.14);
+  color: var(--ember-2);
+}
+.lineBtn {
+  color: var(--ember-2);
+  border-color: rgba(255, 176, 86, 0.45);
+}
+.lineBtn .mono {
+  opacity: 0.7;
+  border: 1px solid rgba(255, 176, 86, 0.4);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+.dockLabel {
+  font-size: 13px;
+}
+.dockDivider {
+  width: 1px;
+  height: 30px;
+  background: var(--line);
+  flex: none;
+  margin: 0 2px;
+}
+.badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 10px var(--mono);
+  font-weight: 700;
+  color: #1a0f08;
+  background: var(--ember-2);
+  border-radius: 9px;
+}
+/* on narrow screens, collapse the secondary buttons to icon-only */
+@media (max-width: 640px) {
+  .dockLabel {
+    display: none;
+  }
+  .lineBtn .mono {
+    display: none;
   }
 }
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 16px;
+
+/* ===== slide-over drawers ===== */
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.4);
+  animation: carFade 0.15s ease-out;
+}
+.drawer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 31;
+  width: min(400px, 88vw);
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  background: var(--panel);
+  box-shadow: 0 0 60px rgba(0, 0, 0, 0.6);
 }
-/* the left setup column can be taller than the viewport (scene card + sides + compile +
-   controls + hint) — let it scroll on its own instead of clipping against the fixed grid */
-.setup {
+.drawerLeft {
+  left: 0;
+  border-right: 1px solid var(--line);
+  animation: slideL 0.2s ease-out;
+}
+.drawerRight {
+  right: 0;
+  border-left: 1px solid var(--line);
+  animation: slideR 0.2s ease-out;
+}
+@keyframes slideL {
+  from { transform: translateX(-100%); }
+  to { transform: none; }
+}
+@keyframes slideR {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+.drawerHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.drawerClose {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  font-size: 13px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.drawerClose:hover {
+  color: var(--text);
+  border-color: var(--ember-2);
+}
+.drawerBody {
+  flex: 1;
   overflow-y: auto;
+  padding: 16px;
 }
 .panelLabel {
   font-size: 11px;
@@ -234,35 +482,15 @@
   color: var(--muted);
   border: 1px solid var(--line);
 }
-.ghost:not(:disabled):hover {
-  border-color: var(--muted);
-  color: var(--ink);
-}
-.reset {
-  border-style: dashed;
-}
 .hint {
   color: var(--muted);
-  margin-top: auto;
   padding-top: 12px;
 }
 
-/* center — the self-tape */
-.stage {
-  padding: 0;
-  overflow: hidden;
-  background: #000;
-  position: relative;
-}
-.videoWrap {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  min-height: 360px;
-  background: #000;
-  display: flex;
-}
+/* the live camera fills the whole stage */
 .cam {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -287,15 +515,16 @@
   align-items: center;
   justify-content: center;
   color: var(--muted);
+  z-index: 2;
 }
 
-/* state pill */
+/* state pill — clears the top HUD */
 .pill {
   position: absolute;
-  top: 16px;
+  top: 58px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 3;
+  z-index: 15;
   padding: 8px 16px;
   border-radius: 22px;
   font-size: 13px;
@@ -371,33 +600,74 @@
   transition: width 0.08s linear;
 }
 
-/* co-star subtitle */
-.subtitle {
+/* ===== bottom stack: co-star caption + teleprompter, floating above the dock ===== */
+.bottomStack {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 34px;
-  z-index: 3;
+  bottom: 92px; /* clear the control dock */
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  pointer-events: none;
+}
+.captionWrap {
+  max-width: 760px;
   text-align: center;
-  padding: 0 40px;
-  font-size: 22px;
+}
+.subtitle {
+  text-align: center;
+  font-size: clamp(18px, 3.4vw, 24px);
   font-weight: 600;
   line-height: 1.35;
-  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.9);
-  min-height: 30px;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.95);
 }
 .whoSpoke {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 14px;
-  z-index: 3;
+  margin-top: 4px;
   text-align: center;
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--ember-2);
   text-shadow: 0 2px 8px #000;
+}
+
+/* eyeline + "just say Line" coaching card, centered in the lower third when idle */
+.coach {
+  position: absolute;
+  left: 50%;
+  top: 62%;
+  transform: translate(-50%, -50%);
+  z-index: 14;
+  max-width: 340px;
+  text-align: center;
+  padding: 16px 22px;
+  border-radius: 16px;
+  background: rgba(10, 12, 18, 0.62);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--line);
+  pointer-events: none;
+  animation: rise 0.25s ease;
+}
+.coachEye {
+  font-size: 30px;
+  margin-bottom: 6px;
+}
+.coach p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.4;
+}
+.coach b {
+  color: var(--ember-2);
+}
+.coachSub {
+  margin-top: 6px !important;
+  font-size: 13px !important;
+  color: var(--muted);
 }
 
 /* right — transcript + notes */
@@ -507,8 +777,9 @@
   background: rgba(255, 176, 86, 0.1);
 }
 .teleprompter {
-  margin-top: 12px;
-  max-height: 26vh;
+  width: 100%;
+  max-width: 760px;
+  max-height: 24vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -516,7 +787,9 @@
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  pointer-events: auto; /* scrollable even though the stack ignores pointers */
 }
 .tLine {
   display: grid;
@@ -553,9 +826,9 @@
 .linePrompt {
   position: absolute;
   left: 50%;
-  top: 50%;
+  top: 46%;
   transform: translate(-50%, -50%);
-  z-index: 5;
+  z-index: 16;
   max-width: 78%;
   text-align: center;
   padding: 16px 22px;
@@ -643,8 +916,13 @@
   overflow-x: auto;
   padding: 10px 2px 4px;
 }
+/* takes stacked in the notes drawer */
+.takeCol {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
 .takeCard {
-  flex: 0 0 300px;
   display: flex;
   flex-direction: column;
   gap: 8px;
