@@ -1,6 +1,8 @@
 // Cut! — Director Control Panel (step 2: webcam + preview + live Qwen-VL perception)
 // The <canvas> render loop is where matting / parallax / generated backgrounds plug in later.
 
+import { GLCompositor, LAYERS } from './composite_gl.js';
+
 // Alibaba Function Compute perception service (scale-to-zero). Holds the DashScope key.
 const BACKEND_URL = 'https://cut-perceive-xfdwmitvbk.ap-southeast-1.fcapp.run';
 const PERCEIVE_MS = 4000; // how often the director "looks" while a session rolls
@@ -30,6 +32,12 @@ const els = {
   cast: document.getElementById('cast'),
   transcript: document.getElementById('transcript'),
   subtitle: document.getElementById('subtitle'),
+  inspectBtn: document.getElementById('inspectBtn'),
+  inspect: document.getElementById('inspect'),
+  inspectGrid: document.getElementById('inspectGrid'),
+  inspectSliders: document.getElementById('inspectSliders'),
+  inspectClose: document.getElementById('inspectClose'),
+  inspectHint: document.getElementById('inspectHint'),
 };
 
 // Cinematic "looks" — canvas filter strings. Stand-ins for the Editor agent's grade decisions.
@@ -54,6 +62,18 @@ const state = {
   perceiving: false, prior: null, sceneNum: 0, perceiveTimer: 0, capCanvas: null,
   // matting / background
   bgName: 'None', autoBg: 'Studio', bgCanvas: null, maskCanvas: null, personCanvas: null, maskReady: false,
+  maskEMA: null,           // temporal EMA of the confidence mask (kills per-frame flicker)
+  // live compositor realism knobs — ported from backend/render/composite.py, tunable in the inspect modal
+  glParams: {
+    emaK: 0.5,             // mask EMA blend (1 = no smoothing, lower = steadier edges)
+    refineLo: 0.30, refineHi: 0.62,  // smoothstep on the soft confidence ramp; (hi-lo) = feather
+    wrapPx: 8,             // blur radius for light-wrap + contact-shadow (px)
+    wrapStrength: 0.6,     // 0..1 light bleed onto the edge
+    colorBlend: 0.35,      // 0..1 Reinhard pull of FG colour toward the world
+    spill: 0.5,            // 0..1 edge desaturate/darken (stands in for RVM's spill-free fgr)
+    shadow: 0.30,          // 0..1 contact-shadow darkening
+    shadowDx: 0.010, shadowDy: 0.006,  // shadow offset in uv
+  },
   // generated worlds (qwen-image via FC)
   worldImg: null, autoUseImg: false, lastSetting: '', genCache: new Map(),
   // audio / transcription (qwen3-asr-flash via FC)
@@ -231,6 +251,7 @@ function sameSetting(a, b) {
 }
 
 let segmenter = null, segReady = false, segBusy = false, segLoading = false;
+const glComp = new GLCompositor();   // .ok === false on old GPUs → 2D fallback
 
 function effBg() { return state.bgName === 'Auto' ? (state.autoBg || 'Studio') : state.bgName; }
 
@@ -260,11 +281,18 @@ function onSeg(result) {
     const mask = result.confidenceMasks && result.confidenceMasks[0];
     if (mask) {
       const mw = mask.width, mh = mask.height, f = mask.getAsFloat32Array();
+      // temporal EMA — SelfieSegmenter is per-frame with no recurrent memory, so its
+      // edges shimmer; blend each result toward the running average to steady them.
+      const k = state.glParams.emaK;
+      let ema = state.maskEMA;
+      if (!ema || ema.length !== f.length) { ema = state.maskEMA = Float32Array.from(f); }
+      else if (k >= 1) { ema.set(f); }
+      else { for (let i = 0; i < f.length; i++) ema[i] += (f[i] - ema[i]) * k; }
       const mc = state.maskCanvas || (state.maskCanvas = document.createElement('canvas'));
       if (mc.width !== mw || mc.height !== mh) { mc.width = mw; mc.height = mh; }
       const mctx = mc.getContext('2d');
       const img = mctx.createImageData(mw, mh), d = img.data;
-      for (let i = 0; i < f.length; i++) { const j = i << 2; d[j] = d[j+1] = d[j+2] = 255; d[j+3] = f[i] * 255; }
+      for (let i = 0; i < ema.length; i++) { const j = i << 2; d[j] = d[j+1] = d[j+2] = 255; d[j+3] = ema[i] * 255; }
       mctx.putImageData(img, 0, 0);
       state.maskReady = true;
       if (mask.close) mask.close();
@@ -353,6 +381,21 @@ function buildBg() {
 function compositeFrame() {
   const ctx = state.ctx, w = els.cut.width, h = els.cut.height;
   if (!state.bgCanvas) buildBg();
+
+  // Preferred path: WebGL2 compositor — refine + feather + light-wrap + colour-match +
+  // spill-knockdown + contact-shadow in one pass (composite_gl.js). Falls back to the
+  // flat destination-in composite below if WebGL2 is unavailable.
+  if (glComp.ok && state.bgCanvas) {
+    const gl = glComp.frame(els.cam, state.bgCanvas, state.maskReady ? state.maskCanvas : null, state.glParams, 0);
+    if (gl) {
+      ctx.filter = GRADES[state.grade] || 'none';     // grade the whole world for cohesion
+      ctx.drawImage(gl, 0, 0, w, h);
+      ctx.filter = 'none';
+      if (inspectOpen) renderInspect();
+      return;
+    }
+  }
+
   ctx.filter = GRADES[state.grade] || 'none';         // grade the whole world for cohesion
   if (state.bgCanvas) ctx.drawImage(state.bgCanvas, 0, 0, w, h);
   else { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h); }
@@ -679,6 +722,83 @@ function snapshot() {
   log('Snapshot saved (director\'s cut frame)');
 }
 
+// ---------- inspect modal (live per-layer view of the compositor) ----------
+let inspectOpen = false, inspectBuilt = false;
+const INSPECT_SLIDERS = [
+  { key: 'emaK',         label: 'Temporal EMA',    min: 0.05, max: 1,   step: 0.05 },
+  { key: 'refineLo',     label: 'Refine · low',    min: 0,    max: 1,   step: 0.01 },
+  { key: 'refineHi',     label: 'Refine · high',   min: 0,    max: 1,   step: 0.01 },
+  { key: 'wrapPx',       label: 'Blur radius (px)', min: 0,   max: 24,  step: 1    },
+  { key: 'wrapStrength', label: 'Light wrap',      min: 0,    max: 1.5, step: 0.05 },
+  { key: 'colorBlend',   label: 'Colour match',    min: 0,    max: 1,   step: 0.05 },
+  { key: 'spill',        label: 'Spill knockdown', min: 0,    max: 1,   step: 0.05 },
+  { key: 'shadow',       label: 'Contact shadow',  min: 0,    max: 1,   step: 0.05 },
+];
+const inspectThumbs = [];   // { id, ctx }
+
+function buildInspect() {
+  if (inspectBuilt) return;
+  inspectBuilt = true;
+  for (const layer of LAYERS) {
+    const card = document.createElement('div');
+    card.className = 'ins-card';
+    const cv = document.createElement('canvas');
+    cv.width = 300; cv.height = 169;                 // 16:9 thumbnail
+    const cap = document.createElement('div');
+    cap.className = 'ins-cap'; cap.textContent = layer.name;
+    card.appendChild(cv); card.appendChild(cap);
+    els.inspectGrid.appendChild(card);
+    inspectThumbs.push({ id: layer.id, ctx: cv.getContext('2d') });
+  }
+  for (const s of INSPECT_SLIDERS) {
+    const row = document.createElement('label');
+    row.className = 'ins-slider';
+    const name = document.createElement('span'); name.textContent = s.label;
+    const val = document.createElement('span'); val.className = 'ins-val';
+    const input = document.createElement('input');
+    input.type = 'range'; input.min = s.min; input.max = s.max; input.step = s.step;
+    input.value = state.glParams[s.key];
+    val.textContent = (+input.value).toFixed(s.step < 1 ? 2 : 0);
+    input.oninput = () => {
+      state.glParams[s.key] = parseFloat(input.value);
+      val.textContent = (+input.value).toFixed(s.step < 1 ? 2 : 0);
+    };
+    row.appendChild(name); row.appendChild(input); row.appendChild(val);
+    els.inspectSliders.appendChild(row);
+  }
+}
+
+function inspectActive() {
+  return glComp.ok && state.running && effBg() !== 'None' && segReady;
+}
+
+function openInspect() {
+  buildInspect();
+  inspectOpen = true;
+  els.inspect.classList.add('show');
+  els.inspectHint.style.display = inspectActive() ? 'none' : 'block';
+  els.inspectHint.textContent = !glComp.ok
+    ? 'WebGL2 unavailable on this device — the 2D fallback composite is in use, so layers can’t be inspected.'
+    : 'Start the camera and pick a World (not “None”) to see the layers update live.';
+  renderInspect();   // paint immediately if a frame already exists
+}
+
+function closeInspect() {
+  inspectOpen = false;
+  els.inspect.classList.remove('show');
+}
+
+// Called every composite frame while the modal is open — re-render each layer view
+// from the frame the compositor already uploaded (cheap: no re-upload, just a redraw).
+function renderInspect() {
+  if (!inspectOpen || !glComp.ok) return;
+  els.inspectHint.style.display = inspectActive() ? 'none' : 'block';
+  for (const t of inspectThumbs) {
+    const gl = glComp.view(t.id);
+    if (gl) t.ctx.drawImage(gl, 0, 0, t.ctx.canvas.width, t.ctx.canvas.height);
+  }
+}
+
 // ---------- wire up ----------
 els.startBtn.onclick = () => startCamera(els.deviceSel.value || undefined);
 els.toggleBtn.onclick = toggleSession;
@@ -698,6 +818,10 @@ els.genWorld.onclick = () => {
   generateWorld(p, false);
 };
 els.worldPrompt.onkeydown = (e) => { if (e.key === 'Enter') els.genWorld.onclick(); };
+els.inspectBtn.onclick = () => (inspectOpen ? closeInspect() : openInspect());
+els.inspectClose.onclick = closeInspect;
+els.inspect.onclick = (e) => { if (e.target === els.inspect) closeInspect(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && inspectOpen) closeInspect(); });
 
 buildGrades();
 buildBgSelect();

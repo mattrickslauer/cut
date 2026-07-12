@@ -67,8 +67,24 @@
     </div>
     <div class="group grow"></div>
     <div class="group">
+      <button id="inspectBtn" class="ghost">Inspect layers 🔬</button>
       <button id="snapBtn" class="ghost" disabled>Snapshot</button>
       <button id="toggleBtn" class="primary" disabled>Start session</button>
+    </div>
+  </div>
+
+  <!-- INSPECT LAYERS MODAL -->
+  <div id="inspect" class="modal">
+    <div class="modal-box">
+      <header class="modal-head">
+        <h2>Cutout compositor — live layers</h2>
+        <button id="inspectClose" class="ghost">Close ✕</button>
+      </header>
+      <p id="inspectHint" class="ins-hint"></p>
+      <div class="modal-body">
+        <div id="inspectGrid" class="ins-grid"></div>
+        <div id="inspectSliders" class="ins-panel"></div>
+      </div>
     </div>
   </div>
 
