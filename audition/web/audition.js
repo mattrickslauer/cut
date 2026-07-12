@@ -51,6 +51,7 @@ const $ = {
   subtitle:el('subtitle'), whoSpoke:el('whoSpoke'), dialogue:el('dialogue'),
   notesList:el('notesList'), stakes:document.querySelectorAll('.stakes i'),
   recDot:el('recDot'), sessionTime:el('sessionTime'), takeTag:el('takeTag'), player:el('player'),
+  playback:el('playback'),
 };
 
 const S = {
@@ -91,6 +92,8 @@ function setState(st){
 $.startBtn.onclick = async () => {
   try {
     setState('idle'); $.pill.textContent = 'Starting…';
+    try { $.playback.pause(); } catch(_){}                 // leaving playback → back to live
+    $.playback.hidden = true; $.cam.style.display = '';
     fetch(BACKEND_URL + '/warm').catch(()=>{});           // hide FC cold start
     if (!S.stream){                                        // grab it now if the preview didn't already
       S.stream = await navigator.mediaDevices.getUserMedia(MEDIA);
@@ -111,21 +114,33 @@ $.startBtn.onclick = async () => {
   } catch (e) { setState('idle'); $.pill.textContent = 'Camera/mic blocked: ' + e.message; }
 };
 
-// stop the whole audition: end capture, release camera+mic, reset to idle.
+// stop the audition, then play back the take you just recorded.
 $.stopBtn.onclick = () => {
   stopSR();
   try { $.player.pause(); } catch(_){}
-  try { S.recorder && S.recorder.state !== 'inactive' && S.recorder.stop(); } catch(_){}
-  try { S.node && S.node.disconnect(); S.source && S.source.disconnect(); } catch(_){}
-  try { S.audioCtx && S.audioCtx.close(); } catch(_){}
-  try { S.stream && S.stream.getTracks().forEach(t => t.stop()); } catch(_){}
   clearInterval(S.timer);
-  S.stream = S.audioCtx = S.node = S.source = null; S.state = 'idle';
-  $.cam.srcObject = null; $.camOff.style.display = '';
-  $.subtitle.textContent = ''; $.whoSpoke.textContent = ''; $.meterFill.style.width = '0';
-  $.startBtn.disabled = false; $.stopBtn.disabled = true;
-  $.newTakeBtn.disabled = true; $.saveBtn.disabled = true;
-  setState('idle');
+  const finish = () => {                                   // runs once the recording is flushed
+    try { S.node && S.node.disconnect(); S.source && S.source.disconnect(); } catch(_){}
+    try { S.audioCtx && S.audioCtx.close(); } catch(_){}
+    try { S.stream && S.stream.getTracks().forEach(t => t.stop()); } catch(_){}
+    S.stream = S.audioCtx = S.node = S.source = null; S.state = 'idle';
+    $.subtitle.textContent = ''; $.whoSpoke.textContent = ''; $.meterFill.style.width = '0';
+    $.recDot.className = 'rec-dot off';
+    if (S.chunks && S.chunks.length){                       // show playback of the take
+      if (S.playbackUrl) URL.revokeObjectURL(S.playbackUrl);
+      S.playbackUrl = URL.createObjectURL(new Blob(S.chunks, { type:'video/webm' }));
+      $.cam.style.display = 'none'; $.camOff.style.display = 'none';
+      $.playback.src = S.playbackUrl; $.playback.hidden = false;
+      $.pill.className = 'pill idle'; $.pill.innerHTML = '▶ Take ' + S.take + ' — playback';
+      $.playback.play().catch(()=>{});
+      $.saveBtn.disabled = false;                           // let them keep the take
+    } else {
+      $.cam.srcObject = null; $.camOff.style.display = ''; setState('idle'); $.saveBtn.disabled = true;
+    }
+    $.startBtn.disabled = false; $.stopBtn.disabled = true; $.newTakeBtn.disabled = true;
+  };
+  if (S.recorder && S.recorder.state !== 'inactive'){ S.recorder.onstop = finish; try { S.recorder.stop(); } catch(_){ finish(); } }
+  else finish();
 };
 function pickMime(){ for (const m of ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']) if (MediaRecorder.isTypeSupported(m)) return {mimeType:m}; return {}; }
 
