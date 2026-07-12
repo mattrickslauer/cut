@@ -8,7 +8,8 @@
 // mic + reader voice into the recording, an energy-VAD, a director's-cut canvas compositor, and a
 // MediaRecorder paused during "thinking". React owns the declarative UI and drives this via refs.
 
-import { AUDITION_URL } from "@/lib/config";
+import { AUDITION_URL, RENDER_URL } from "@/lib/config";
+import { lookForTone, takeToEdl, type Edl } from "@/lib/edl";
 import type { Scene } from "./scenes";
 import { LINE_MATCH_THRESHOLD, lineSimilarity, parseScript, type ScriptLine } from "./script";
 import { ASR_RATE, encodeWav, flatten } from "./wav";
@@ -74,6 +75,12 @@ export type AuditionView = {
   compileTotal: number;
   // archived takes for side-by-side compare (newest first)
   takes: { id: number; n: number; title: string; url: string; notes: Note[]; stakes: number; lineCount: number }[];
+  // "Render film": ship the take + its EDL to the GPU render lane for a graded cut.
+  // renderAvailable is false unless NEXT_PUBLIC_RENDER_URL is set (the service is off the FC path).
+  renderAvailable: boolean;
+  canRender: boolean;
+  renderStatus: string | null; // progress/error text while a film renders; null when idle
+  filmUrl: string | null; // the finished, graded mp4 once the render job completes
 };
 
 export function initialView(): AuditionView {
@@ -106,6 +113,10 @@ export function initialView(): AuditionView {
     compileProgress: 0,
     compileTotal: 0,
     takes: [],
+    renderAvailable: !!RENDER_URL,
+    canRender: false,
+    renderStatus: null,
+    filmUrl: null,
   };
 }
 
@@ -120,6 +131,8 @@ type TakeRecord = {
   notes: Note[];
   stakes: number;
   cues: Cue[];
+  blob: Blob; // the recorded webm, retained for upload to the render lane
+  edl: Edl; // the take turned into a render-ready Edit Decision List
 };
 
 export class AuditionEngine {
@@ -156,6 +169,12 @@ export class AuditionEngine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private cues: Cue[] = [];
   private recordStart = 0;
+  // The recorder pauses during "thinking" to edit out AI latency, so the webm's media
+  // timeline is shorter than wall-clock. We track the total paused span to convert
+  // wall-clock into recorded-media seconds — the timebase the EDL (and renderer) use.
+  private pausedAccumMs = 0; // total recorder-paused time this take
+  private pauseStartedAtMs = 0; // performance.now() when the current pause began, else 0
+  private lastTake: TakeRecord | null = null; // most recent archived take, for renderFilm()
   private playbackUrl: string | null = null;
   private mixDest: MediaStreamAudioDestinationNode | null = null;
   private playerSrc: MediaElementAudioSourceNode | null = null;
@@ -417,18 +436,34 @@ export class AuditionEngine {
       pillOverride: null,
       recOn: st !== "idle",
     });
-    // edit out the AI's latency: don't record the "thinking" gap into the tape
+    // edit out the AI's latency: don't record the "thinking" gap into the tape (and keep the
+    // media-time clock in step with the tape by accounting for each paused span)
     if (this.recorder) {
       if (st === "thinking" && this.recorder.state === "recording") {
         try {
           this.recorder.pause();
         } catch {}
+        this.pauseStartedAtMs = performance.now();
       } else if (st !== "thinking" && this.recorder.state === "paused") {
+        if (this.pauseStartedAtMs) {
+          this.pausedAccumMs += performance.now() - this.pauseStartedAtMs;
+          this.pauseStartedAtMs = 0;
+        }
         try {
           this.recorder.resume();
         } catch {}
       }
     }
+  }
+
+  // recorded-media seconds since take start: wall-clock minus the recorder-paused spans (closed
+  // spans in pausedAccumMs plus any span still open). Cue timestamps and the EDL use this clock so
+  // shot boundaries line up with the webm the renderer slices.
+  private mediaTimeSec(): number {
+    if (!this.recordStart) return 0;
+    const now = performance.now();
+    const openPause = this.pauseStartedAtMs ? now - this.pauseStartedAtMs : 0;
+    return Math.max(0, (now - this.recordStart - this.pausedAccumMs - openPause) / 1000);
   }
 
   // ---- camera preview on load ----
@@ -505,6 +540,8 @@ export class AuditionEngine {
     if (this.timer) clearInterval(this.timer);
     cancelAnimationFrame(this.rafId);
     this.rafId = 0;
+    // freeze the recorded-media length now, before we tear down / reset the clock
+    const durationSec = this.mediaTimeSec();
     const finish = () => {
       try {
         this.node?.disconnect();
@@ -532,7 +569,8 @@ export class AuditionEngine {
           canSave: true,
         });
         this.playback.play().catch(() => {});
-        this.archiveTake(); // keep it for side-by-side compare
+        this.archiveTake(durationSec); // keep it for side-by-side compare + render
+        this.patch({ canRender: this.view.renderAvailable, renderStatus: null, filmUrl: null });
       } else {
         this.cam.srcObject = null;
         this.patch({ camOff: true });
@@ -563,6 +601,9 @@ export class AuditionEngine {
       dialogue: [],
       notes: [],
       stakes: 0,
+      canRender: false,
+      renderStatus: null,
+      filmUrl: null,
     });
     this.ensureCanvas();
     if (!this.rafId) this.rafId = requestAnimationFrame(this.drawFrame);
@@ -575,6 +616,8 @@ export class AuditionEngine {
       this.recorder!.start();
     } catch {}
     this.recordStart = performance.now();
+    this.pausedAccumMs = 0;
+    this.pauseStartedAtMs = 0;
     this.sessionStart = performance.now();
     this.startTimer();
     this.resetCapture();
@@ -791,7 +834,7 @@ export class AuditionEngine {
     this.costarShot = { who: whoShort, line };
     this.setState("speaking");
     const cue: Cue | null = this.recordStart
-      ? { t: (performance.now() - this.recordStart) / 1000, end: 0, text: line, who: whoShort }
+      ? { t: this.mediaTimeSec(), end: 0, text: line, who: whoShort }
       : null;
     if (cue) this.cues.push(cue);
     this.clipActive = true;
@@ -802,7 +845,7 @@ export class AuditionEngine {
       this.clipActive = false;
       this.costarVideo.onended = null;
       this.costarVideo.onerror = null;
-      if (cue) cue.end = (performance.now() - this.recordStart) / 1000;
+      if (cue) cue.end = this.mediaTimeSec();
       if (gen === this.gen) after();
     };
     // A missing / unplayable pre-rendered clip degrades gracefully: drop the shot and let the
@@ -911,14 +954,14 @@ export class AuditionEngine {
     this.costarShot = { who: whoShort, line };
     this.setState("speaking");
     const cue: Cue | null = this.recordStart
-      ? { t: (performance.now() - this.recordStart) / 1000, end: 0, text: line, who: whoShort }
+      ? { t: this.mediaTimeSec(), end: 0, text: line, who: whoShort }
       : null;
     if (cue) {
       cue.end = cue.t + Math.min(6, Math.max(2, line.length * 0.06));
       this.cues.push(cue);
     }
     const done = () => {
-      if (cue) cue.end = (performance.now() - this.recordStart) / 1000;
+      if (cue) cue.end = this.mediaTimeSec();
     };
     if (!audioUri) {
       const ac = new AbortController();
@@ -988,8 +1031,15 @@ export class AuditionEngine {
   // ---- takes archive (compare) ----
   // Keep this take for side-by-side compare: its own blob URL (the shared playback URL gets revoked
   // on the next Stop) plus the dialogue, reader notes, stakes, and caption cues it earned.
-  private archiveTake() {
-    const url = URL.createObjectURL(new Blob(this.chunks, { type: "video/webm" }));
+  private archiveTake(durationSec: number) {
+    const blob = new Blob(this.chunks, { type: "video/webm" });
+    const url = URL.createObjectURL(blob);
+    // The take turned into a render-ready EDL: cue spans → shots, scene tone → grade.
+    const edl = takeToEdl([...this.cues], {
+      durationSec,
+      look: lookForTone(this.scene.tone),
+      meta: { scene: this.scene.id, title: this.scene.title, take: this.take },
+    });
     const rec: TakeRecord = {
       id: this.uid++,
       n: this.takes.length + 1,
@@ -999,7 +1049,10 @@ export class AuditionEngine {
       notes: [...this.view.notes],
       stakes: this.view.stakes,
       cues: [...this.cues],
+      blob,
+      edl,
     };
+    this.lastTake = rec;
     this.takes = [rec, ...this.takes]; // newest first
     this.patch({
       takes: this.takes.map((t) => ({
@@ -1041,6 +1094,8 @@ export class AuditionEngine {
         try {
           this.recorder!.start();
           this.recordStart = performance.now();
+          this.pausedAccumMs = 0;
+          this.pauseStartedAtMs = 0;
           this.cues = [];
         } catch {}
       }
@@ -1051,6 +1106,65 @@ export class AuditionEngine {
     a.href = href;
     a.download = name;
     a.click();
+  }
+
+  // ---- render film: hand the take + its EDL to the GPU render lane ----
+  // Upload the recorded webm (so the render box can fetch it by URL), POST {edl, clip} to the
+  // render service, poll the job, and surface the finished graded mp4 in the playback element.
+  // The render service is off the FC path, so this only runs when NEXT_PUBLIC_RENDER_URL is set.
+  async renderFilm() {
+    const take = this.lastTake;
+    if (!RENDER_URL || !take) return;
+    this.patch({ canRender: false, renderStatus: "Uploading take…", filmUrl: null });
+    try {
+      // 1) upload the webm → a fetchable URL (reuses the API's OSS host)
+      const data = await this.blobToDataUrl(take.blob);
+      const up = await this.postJson("/upload", { data, ext: ".webm" });
+      if (!up.url) throw new Error(up.error || "upload failed");
+
+      // 2) submit the render job
+      const sub = await fetch(RENDER_URL + "/render", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ edl: take.edl, clip: up.url }),
+      }).then((r) => r.json());
+      const jobId = sub.job_id;
+      if (!jobId) throw new Error(sub.error || "render submit failed");
+      this.patch({ renderStatus: "Rendering film…" });
+
+      // 3) poll the job (renders are minutes-scale)
+      for (let i = 0; i < 200; i++) {
+        await new Promise((res) => setTimeout(res, 3000));
+        const job = await fetch(`${RENDER_URL}/jobs/${encodeURIComponent(jobId)}`).then((r) => r.json());
+        if (job.status === "done") {
+          const filmUrl = `${RENDER_URL}/jobs/${encodeURIComponent(jobId)}/download`;
+          this.playback.src = filmUrl;
+          this.playback.play().catch(() => {});
+          this.patch({
+            playbackVisible: true,
+            renderStatus: "Film ready",
+            filmUrl,
+            pillOverride: `🎬 Take ${take.n} — final cut`,
+            canRender: true,
+          });
+          return;
+        }
+        if (job.status === "error") throw new Error(job.error || "render failed");
+        if (job.last) this.patch({ renderStatus: `Rendering — ${job.last}` });
+      }
+      throw new Error("render timed out");
+    } catch (e) {
+      this.patch({ renderStatus: "Render error: " + (e as Error).message, canRender: true });
+    }
+  }
+
+  private blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result as string);
+      r.onerror = () => rej(new Error("could not read take"));
+      r.readAsDataURL(blob);
+    });
   }
 
   // ---- session timer ----

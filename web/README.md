@@ -56,8 +56,16 @@ their URLs:
 | `cut-perceive` | `../backend/code/app.py` | `POST /perceive`, `POST /transcribe`, `GET /background` |
 | `cut-audition` | `../audition/server/app.py` | `POST /costar`, `POST /say`, `GET /warm` |
 
-Both are CORS-open (`ACAO: *`), so the browser calls them directly. The heavy offline render
-pipeline in `../backend/render` is not part of this app.
+Both are CORS-open (`ACAO: *`), so the browser calls them directly.
+
+### Render film (audition → final cut)
+
+The offline render pipeline in `../backend/render` is now reachable from the app. Stopping an
+audition take builds an **EDL** from its cue track (`lib/edl.ts` — the TS mirror of
+`../backend/render/edl.py`), and **Render film** uploads the recorded webm (`POST /upload` → OSS)
+and hands `{ edl, clip }` to the render service (`POST /render`), then plays back the graded cut.
+The render service needs a GPU, so it is opt-in: set `NEXT_PUBLIC_RENDER_URL` (below) to show the
+action; unset, it stays hidden and the app behaves exactly as before.
 
 ## Develop
 
@@ -77,6 +85,7 @@ Override the backends with env (e.g. to point at local `python3 app.py` runs):
 cp .env.example .env.local
 # NEXT_PUBLIC_PERCEIVE_URL=http://localhost:9000
 # NEXT_PUBLIC_AUDITION_URL=http://localhost:8787
+# NEXT_PUBLIC_RENDER_URL=http://localhost:9100   # GPU render lane; enables "Render film"
 ```
 
 ## Deploy to Vercel

@@ -115,6 +115,30 @@ The renderer clamps unknown enum values to safe defaults and maps the perception
 agent's vocabulary (`closeup`→`CU`, `noir`→`Noir`, …) so a director-produced read
 drops straight in.
 
+## Bridge: from a live audition take
+
+The EDL is the shared "final clip" contract, so the browser's live lane now feeds this batch lane
+directly — no hand-authored JSON. When you **Stop** an audition take, `web/lib/edl.ts:takeToEdl`
+turns its recorded cue track into an EDL (co-star speech spans → `MCU`/subject `B`, the actor gaps →
+`MS`/subject `A`, tiled contiguous over the take), and **Render film** ships it here:
+
+```
+Audition take (webm)                 web/lib/audition/engine.ts
+   │  cues → takeToEdl()             web/lib/edl.ts   (TS mirror of edl.py)
+   │  POST /upload  (webm → OSS)     backend/api/app.py   → presigned url
+   ▼
+POST /render { edl, clip: url } ──►  this service  ──►  graded cut.mp4
+```
+
+Because the recorder **pauses during "thinking"**, the take's timeline is shorter than wall-clock;
+the engine stamps cues in *recorded-media* seconds so each shot's `[start,end]` lines up with the
+webm this service slices. `web/lib/edl.ts` is the TS mirror of `edl.py` — keep the two vocabularies
+(shots / subjects / looks / transitions) in lock-step. The round-trip contract is asserted by
+`tests/test_edl_bridge.py` against `examples/audition_edl.example.json`.
+
+Set `NEXT_PUBLIC_RENDER_URL` in the web app to this service's base URL (e.g. `http://localhost:9100`
+in dev) to light up the **Render film** action; leave it empty and the action stays hidden.
+
 ## Deployment
 
 The real matte needs **torch + a GPU** — this service belongs on a GPU instance,

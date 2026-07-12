@@ -220,7 +220,20 @@ export default function AuditionRoom() {
             >
               ⬇ Save take
             </button>
+            {view.renderAvailable && (
+              <button
+                className={`${styles.btn} ${styles.ghost}`}
+                disabled={!view.canRender}
+                onClick={() => engineRef.current?.renderFilm()}
+                title="Send this take + its EDL to the render lane for a graded, cut film"
+              >
+                🎬 Render film
+              </button>
+            )}
           </div>
+          {view.renderStatus && (
+            <p className={`${styles.hint} ${styles.mono}`}>{view.renderStatus}</p>
+          )}
           <p className={`${styles.hint} ${styles.mono}`}>
             Once you start, just act — it hears when you finish and replies. If it misses your
             ending, press <b>Space</b> or tap the video to send. Camera previews on load.

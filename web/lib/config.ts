@@ -9,3 +9,8 @@ export const PERCEIVE_URL =
 export const AUDITION_URL =
   process.env.NEXT_PUBLIC_AUDITION_URL ??
   "https://cut-audition-htjhmbyvbv.ap-southeast-1.fcapp.run";
+
+// The GPU render service (backend/render/server.py) — the batch "final film" lane. It isn't a
+// scale-to-zero function, so there's no default: set NEXT_PUBLIC_RENDER_URL to your render box
+// (or http://localhost:9100 in dev). Empty ⇒ the "Render film" action stays hidden.
+export const RENDER_URL = process.env.NEXT_PUBLIC_RENDER_URL ?? "";

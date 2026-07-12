@@ -368,7 +368,8 @@ def _decode_data_uri(uri):
     if head.startswith("data:"):
         ctype = head[5:].split(";")[0] or ctype
     ext = {"audio/wav": "wav", "audio/x-wav": "wav", "audio/mpeg": "mp3", "audio/mp3": "mp3",
-           "image/png": "png", "image/jpeg": "jpg"}.get(ctype, "bin")
+           "image/png": "png", "image/jpeg": "jpg",
+           "video/webm": "webm", "video/mp4": "mp4"}.get(ctype, "bin")
     return base64.b64decode(b64), ctype, ext
 
 
@@ -626,8 +627,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        if path not in ("/costar", "/say", "/portrait", "/avatar", "/perceive", "/transcribe"):
+        if path not in ("/costar", "/say", "/portrait", "/avatar", "/perceive", "/transcribe", "/upload"):
             return self._json(404, {"error": "not found"})
+        if path == "/upload":                          # host a recorded take on OSS → a fetchable url
+            # The render lane (backend/render/server.py) pulls the source clip by URL; a browser take
+            # is a data URI, so we re-host it. Needs only object storage, not the model key.
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                req = json.loads(self.rfile.read(n).decode() or "{}")
+            except Exception as e:
+                return self._json(400, {"error": f"bad request: {e}"})
+            if not oss_enabled():
+                return self._json(503, {"error": "OSS not configured (set OSS_BUCKET / OSS_KEY_ID / OSS_KEY_SECRET)"})
+            if not req.get("data"):
+                return self._json(400, {"error": "missing 'data'"})
+            try:
+                raw, ctype, ext = _decode_data_uri(req["data"])
+                return self._json(200, {"url": oss_host(raw, ctype, ext)})
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
         if not API_KEY:
             return self._json(500, {"error": "QWEN_API_KEY not configured"})
         try:
