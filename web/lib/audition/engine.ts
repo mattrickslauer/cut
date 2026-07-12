@@ -69,6 +69,7 @@ export type AuditionView = {
   canCompile: boolean;
   compiling: boolean;
   compiled: boolean;
+  prerendered: boolean; // compiled clips shipped with the scene (no on-device compile needed)
   compileProgress: number;
   compileTotal: number;
   // archived takes for side-by-side compare (newest first)
@@ -101,6 +102,7 @@ export function initialView(): AuditionView {
     canCompile: false,
     compiling: false,
     compiled: false,
+    prerendered: false,
     compileProgress: 0,
     compileTotal: 0,
     takes: [],
@@ -217,6 +219,44 @@ export class AuditionEngine {
     this.scene = s;
     this.reparse();
   }
+  // Load a library scene wholesale: swap the scene, pull in its baked-in sides, and bind any
+  // pre-rendered ("pre-compiled") talking-head clips that shipped with it so the co-star performs
+  // as a real face from the first line — no on-device compile. Used by the carousel picker.
+  loadScene(s: Scene) {
+    if (this.state !== "idle") return; // don't hot-swap the scene mid-take
+    this.scene = s;
+    this.script = s.sides ?? "";
+    this.parsed = this.currentScript()
+      ? parseScript(this.script, this.scene.ai_character, this.scene.human_character)
+      : [];
+    this.compiled = false;
+    this.clips.clear();
+    this.portrait = null;
+    const hasCostar = this.parsed.some((l) => l.who === "costar");
+    // Map the shipped clips onto co-star lines in script order (clips[k] → k-th co-star line).
+    const pre = this.scene.costar;
+    if (pre && pre.clips.length && hasCostar) {
+      this.portrait = pre.portrait || null;
+      this.parsed
+        .filter((l) => l.who === "costar")
+        .forEach((l, k) => {
+          const url = pre.clips[k];
+          if (url) this.clips.set(l.i, url);
+        });
+      this.compiled = this.clips.size > 0;
+    }
+    this.patch({
+      scriptLines: this.parsed.map((l) => ({ i: l.i, who: l.who, speaker: l.speaker, text: l.text })),
+      currentLine: -1,
+      scripted: false,
+      linePrompt: null,
+      compiled: this.compiled,
+      prerendered: this.compiled,
+      canCompile: hasCostar && !this.compiling && !this.compiled,
+      compileProgress: 0,
+      compileTotal: 0,
+    });
+  }
   setScript(text: string) {
     this.script = text;
     this.reparse();
@@ -241,6 +281,7 @@ export class AuditionEngine {
         scripted: false,
         linePrompt: null,
         compiled: false,
+        prerendered: false, // editing the sides invalidates any pre-rendered co-star
         canCompile: this.parsed.some((l) => l.who === "costar") && !this.compiling,
         compileProgress: 0,
         compileTotal: 0,
@@ -749,6 +790,7 @@ export class AuditionEngine {
       canCompile: false,
       compiling: true,
       compiled: false,
+      prerendered: false,
       compileProgress: 0,
       compileTotal: lines.length,
       pillOverride: "Compiling scene partner — generating the co-star's face…",
@@ -813,14 +855,34 @@ export class AuditionEngine {
       : null;
     if (cue) this.cues.push(cue);
     this.clipActive = true;
+    let settled = false;
     const finish = () => {
+      if (settled) return;
+      settled = true;
       this.clipActive = false;
+      this.costarVideo.onended = null;
+      this.costarVideo.onerror = null;
       if (cue) cue.end = (performance.now() - this.recordStart) / 1000;
       if (gen === this.gen) after();
     };
+    // A missing / unplayable pre-rendered clip degrades gracefully: drop the shot and let the
+    // co-star deliver this line voice-only, so a not-yet-filmed scene still reads end to end.
+    const fallback = () => {
+      if (settled) return;
+      settled = true;
+      this.clipActive = false;
+      this.costarVideo.onended = null;
+      this.costarVideo.onerror = null;
+      if (cue) {
+        const ix = this.cues.indexOf(cue);
+        if (ix >= 0) this.cues.splice(ix, 1); // say() records its own cue
+      }
+      if (gen === this.gen) this.say(who, line, undefined, after);
+    };
     this.costarVideo.src = src;
     this.costarVideo.onended = finish;
-    this.costarVideo.play().catch(finish);
+    this.costarVideo.onerror = fallback;
+    this.costarVideo.play().catch(fallback);
   }
 
   private onAudio = (e: AudioProcessingEvent) => {

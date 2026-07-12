@@ -13,8 +13,28 @@ web/
   lib/
     config.ts             the two backend URLs (env-overridable)
     director/             grades, backgrounds, wav, engine (the real-time pipeline)
-    audition/             scenes, wav, engine (VAD + audio-mix + compositor + recorder)
+    audition/             scenes, script, wav, engine (VAD + audio-mix + compositor + recorder)
 ```
+
+### Scene library & pre-rendered co-stars
+
+The Audition Room opens on a **full-screen poster carousel** (`app/audition/SceneCarousel.tsx`) of
+iconic film two-handers. Each scene in `lib/audition/scenes.ts` carries its **sides baked in** (they
+auto-load into the teleprompter and drive the co-star) plus poster art.
+
+A scene can also ship a **pre-compiled co-star** — a portrait + one lip-synced clip per co-star line,
+so the partner performs as a real face from the first line with no on-device "Compile" wait. Those
+assets live in `public/costar-clips/<scene-id>/` and are referenced by `lib/audition/costars.json`
+(generated, not hand-edited). Render them with:
+
+```bash
+npm run prerender-costars            # every scene with sides
+npm run prerender-costars casablanca # just one
+```
+
+The script drives the same `cut-api` backend (`/portrait` → `/say` → `/avatar`). Until a scene is
+rendered, its co-star simply reads with the live voice — a missing clip degrades to voice-only, so
+scenes always play end to end. See `public/costar-clips/README.md`.
 
 ## Architecture
 

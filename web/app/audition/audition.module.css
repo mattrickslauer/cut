@@ -649,3 +649,261 @@
   flex-direction: column;
   gap: 6px;
 }
+
+/* ---- scene library: SCENE panel header + full-screen carousel picker ---- */
+.browseBtn {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.browseBtn:hover {
+  border-color: var(--ember-2);
+  background: var(--panel);
+}
+.sceneTitleRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.sceneName {
+  font-size: 15px;
+}
+.sceneFilm {
+  font: 11px var(--mono);
+  color: var(--ember-2);
+  white-space: nowrap;
+}
+.preReady {
+  font-size: 13px;
+  font-weight: 600;
+  color: #7fe0a8;
+  background: rgba(60, 180, 120, 0.1);
+  border: 1px solid rgba(96, 200, 140, 0.35);
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+
+/* full-screen carousel overlay */
+.carousel {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: rgba(7, 8, 11, 0.92);
+  backdrop-filter: blur(10px);
+  animation: carFade 0.18s ease-out;
+}
+@keyframes carFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.carHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 22px;
+}
+.carTitle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 700;
+}
+.carCount {
+  font: 12px var(--mono);
+  color: var(--muted);
+  margin-left: 4px;
+}
+.carClose {
+  font-size: 16px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+}
+.carClose:hover {
+  color: var(--text);
+  border-color: var(--ember-2);
+}
+.carStage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 0 18px;
+  min-height: 0;
+}
+.carArrow {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  font-size: 30px;
+  line-height: 1;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.carArrow:hover {
+  border-color: var(--ember-2);
+  transform: scale(1.06);
+}
+.slide {
+  position: relative;
+  width: min(560px, 82vw);
+  max-height: 82vh;
+  overflow-y: auto;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  padding: 34px 32px 30px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+  color: #f4f1ea;
+}
+.slideGlow {
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  background: radial-gradient(120% 60% at 50% 0%, rgba(0, 0, 0, 0) 40%, rgba(0, 0, 0, 0.45) 100%);
+  pointer-events: none;
+}
+.slideEmoji {
+  font-size: 54px;
+  line-height: 1;
+  margin-bottom: 14px;
+}
+.slideBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.slideFilm {
+  font: 11px var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f4f1ea;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+.slidePre {
+  font: 11px var(--mono);
+  color: #7fe0a8;
+  background: rgba(20, 60, 40, 0.5);
+  border: 1px solid rgba(120, 220, 160, 0.4);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+.slideTitle {
+  font-size: 30px;
+  line-height: 1.1;
+  margin: 4px 0 14px;
+  font-weight: 800;
+}
+.slideRoles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.roleChip {
+  font-size: 12.5px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+.roleChip b {
+  color: rgba(255, 255, 255, 0.62);
+  font-weight: 600;
+  margin-right: 5px;
+}
+.slidePremise {
+  font-size: 14px;
+  line-height: 1.55;
+  margin: 0 0 12px;
+  color: rgba(244, 241, 234, 0.9);
+}
+.slideOpen {
+  font-size: 13px;
+  margin: 0 0 20px;
+  color: rgba(244, 241, 234, 0.72);
+}
+.slideOpen em {
+  color: #fff;
+}
+.slideGo {
+  position: relative;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  color: #12100c;
+  background: linear-gradient(180deg, #f6d9a0, #e8b878);
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  width: 100%;
+}
+.slideGo:hover {
+  filter: brightness(1.05);
+}
+.carDots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px 0 22px;
+}
+.carDot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(255, 255, 255, 0.24);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s, transform 0.15s;
+}
+.carDot:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+.carDotOn {
+  background: var(--ember-2, #e8b878);
+  transform: scale(1.35);
+}
+@media (max-width: 620px) {
+  .carArrow {
+    width: 42px;
+    height: 42px;
+    font-size: 24px;
+  }
+  .slide {
+    padding: 26px 20px 24px;
+  }
+  .slideTitle {
+    font-size: 24px;
+  }
+}
