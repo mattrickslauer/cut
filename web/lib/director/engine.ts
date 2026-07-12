@@ -31,6 +31,18 @@ const VAD_START = 0.012,
   VAD_MIN_MS = 400,
   VAD_MAX_MS = 5000;
 
+// Adaptive noise gate: hold the speech bar a fixed ratio above the room's
+// ambient level so steady background (fans, traffic, chatter, music) never trips
+// the VAD — only the actor's voice, which rises well above the floor, is sent to
+// the ASR. The floor is a min-follower: it rises slowly toward louder ambient
+// (so a spoken line barely lifts it) and falls fast when the room quiets (so it
+// settles on the true noise floor). VAD_START/VAD_END act as a minimum bar so a
+// silent room still behaves as before.
+const NOISE_ON_SNR = 2.5, // onset: rms must exceed the noise floor by this ratio
+  NOISE_OFF_SNR = 1.6, // silence: rms below floor*this counts as a pause
+  NOISE_FLOOR_UP = 0.05, // how fast the floor rises toward louder ambient
+  NOISE_FLOOR_DOWN = 0.3; // how fast it falls when the room quiets
+
 export type CastState = "off" | "detected" | "on";
 export type LogEntry = { id: number; t: string; text: string; hot: boolean };
 export type TranscriptLine = { who: "A" | "B" | "both" | "x"; text: string; seq: number };
@@ -147,6 +159,7 @@ export class DirectorEngine {
   private vadSilenceMs = 0;
   private vadChunkMs = 0;
   private vadHadSpeech = false;
+  private vadNoiseFloor = VAD_START; // adaptive ambient RMS estimate (seed at min bar)
   // character detection
   private faceDetector: any = null;
   private faceReady = false;
@@ -235,7 +248,10 @@ export class DirectorEngine {
     try {
       this.stopTracks();
       const constraints: MediaStreamConstraints = {
-        audio: true,
+        // Let the browser's WebRTC DSP scrub steady background noise before it
+        // reaches the VAD; the adaptive noise-floor gate in startAudio() rejects
+        // what survives so only the actor's voice is transcribed.
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: deviceId
           ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
           : { width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -583,19 +599,28 @@ export class DirectorEngine {
       this.vadSilenceMs = 0;
       this.vadChunkMs = 0;
       this.vadHadSpeech = false;
+      this.vadNoiseFloor = VAD_START;
       proc.onaudioprocess = (e) => {
         const ch = e.inputBuffer.getChannelData(0);
         let s = 0;
         for (let i = 0; i < ch.length; i += 2) s += ch[i] * ch[i];
         const rms = Math.sqrt(s / (ch.length / 2));
         const blockMs = (ch.length / this.srcRate) * 1000;
+        // Track the ambient noise floor every block (min-follower: slow up, fast
+        // down) so it settles on the room tone even while someone is talking.
+        const rate = rms > this.vadNoiseFloor ? NOISE_FLOOR_UP : NOISE_FLOOR_DOWN;
+        this.vadNoiseFloor += (rms - this.vadNoiseFloor) * rate;
+        // Speech bar rides a fixed ratio above that floor (never below the fixed
+        // minimums), so a noisy room raises the bar instead of flooding the ASR.
+        const onThresh = Math.max(VAD_START, this.vadNoiseFloor * NOISE_ON_SNR);
+        const offThresh = Math.max(VAD_END, this.vadNoiseFloor * NOISE_OFF_SNR);
         this.pcmChunks.push(new Float32Array(ch));
         this.pcmLen += ch.length;
         this.vadChunkMs += blockMs;
-        if (rms > VAD_START) {
+        if (rms > onThresh) {
           this.vadHadSpeech = true;
           this.vadSilenceMs = 0;
-        } else if (this.vadHadSpeech && rms < VAD_END) {
+        } else if (this.vadHadSpeech && rms < offThresh) {
           this.vadSilenceMs += blockMs;
         }
         if (!this.vadHadSpeech && this.vadChunkMs > 700) {

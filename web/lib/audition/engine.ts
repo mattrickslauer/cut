@@ -14,13 +14,26 @@ import { LINE_MATCH_THRESHOLD, lineSimilarity, parseScript, type ScriptLine } fr
 import { ASR_RATE, encodeWav, flatten } from "./wav";
 
 const BACKEND_URL = AUDITION_URL;
-const START_RMS = 0.02; // onset threshold (enter HEARING)
+const START_RMS = 0.02; // onset floor (min bar to enter HEARING)
 const END_RMS = 0.011; // below this counts as silence (hysteresis vs START)
 const ONSET_BLK = 2; // consecutive loud blocks before we believe it's speech
 const END_SILENCE_MS = 1200; // trailing silence that ends your line
 const MIN_SPEECH_MS = 400; // ignore blips shorter than this
 const MAX_LINE_MS = 20000; // hard cap on one line
 const PREROLL = 5; // blocks kept before onset so the first word isn't clipped
+
+// Adaptive noise gate: the actor's voice must rise a fixed ratio above the
+// room's ambient level, so steady background (fans, traffic, chatter, music)
+// never trips onset — only speech is captured for ASR. The floor is a
+// min-follower: it rises slowly toward louder ambient (a spoken line barely
+// lifts it) and falls fast when the room quiets (settles on the true noise
+// floor). START_RMS/END_RMS stay as minimum bars so a quiet room behaves exactly
+// as before. Browser noiseSuppression (MEDIA above) cleans the waveform; this
+// decides what's speech.
+const NOISE_ON_SNR = 2.5, // onset: rms must exceed the noise floor by this ratio
+  NOISE_OFF_SNR = 1.6, // silence: rms below floor*this counts as a pause
+  NOISE_FLOOR_UP = 0.05, // how fast the floor rises toward louder ambient
+  NOISE_FLOOR_DOWN = 0.3; // how fast it falls when the room quiets
 
 export const MEDIA: MediaStreamConstraints = {
   video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
@@ -150,6 +163,7 @@ export class AuditionEngine {
   private silenceMs = 0;
   private speechMs = 0;
   private lineMs = 0;
+  private noiseFloor = START_RMS; // adaptive ambient RMS estimate (seed at min bar)
   private recorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private sessionStart = 0;
@@ -937,10 +951,19 @@ export class AuditionEngine {
     this.meterFill.style.width = Math.min(100, rms * 450) + "%";
     const ms = (blk.length / this.srcRate) * 1000;
     if (this.state !== "listening" && this.state !== "hearing") return;
+    // Track the ambient noise floor every block (min-follower: slow up, fast
+    // down) so it settles on the room tone even while someone is talking.
+    const rate = rms > this.noiseFloor ? NOISE_FLOOR_UP : NOISE_FLOOR_DOWN;
+    this.noiseFloor += (rms - this.noiseFloor) * rate;
+    // Speech bar rides a fixed ratio above that floor (never below the fixed
+    // minimums), so a noisy room raises the bar rather than mistaking background
+    // for a delivered line.
+    const onThresh = Math.max(START_RMS, this.noiseFloor * NOISE_ON_SNR);
+    const offThresh = Math.max(END_RMS, this.noiseFloor * NOISE_OFF_SNR);
     this.ring.push(new Float32Array(blk));
     if (this.ring.length > PREROLL) this.ring.shift();
     if (this.state === "listening") {
-      if (rms > START_RMS) {
+      if (rms > onThresh) {
         if (++this.onset >= ONSET_BLK) {
           this.prompting = false; // you're delivering again — end the "asking for a line" cut
           this.setState("hearing");
@@ -956,7 +979,7 @@ export class AuditionEngine {
     this.buffer.push(new Float32Array(blk));
     this.bufLen += blk.length;
     this.lineMs += ms;
-    if (rms < END_RMS) this.silenceMs += ms;
+    if (rms < offThresh) this.silenceMs += ms;
     else {
       this.silenceMs = 0;
       this.speechMs += ms;
