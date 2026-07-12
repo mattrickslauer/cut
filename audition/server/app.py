@@ -35,7 +35,7 @@ not lag. Cold start only hits the first POST after idle — hidden behind GET /w
 Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
-import os, json, base64, time, hmac, hashlib, urllib.request, urllib.error
+import os, re, json, base64, time, hmac, hashlib, urllib.request, urllib.error
 from email.utils import formatdate
 from urllib.parse import urlparse, parse_qs, quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -84,47 +84,64 @@ OSS_KEY_SECRET = os.environ.get("OSS_KEY_SECRET", "").strip()
 OSS_PREFIX = os.environ.get("OSS_PREFIX", "cut-audition/")
 
 # One-word emotion labels (from the co-star reply model) → concrete vocal-delivery instructions.
-# The docs are explicit: describe pitch/pace/emphasis, not vague mood words. Unknown labels fall
-# through to a generic template and rely on optimize_instructions to expand them.
+# The docs are explicit: describe pitch/pace/emphasis, not vague mood words.
+#
+# DELIVERY NOTE: a scene partner has to sound like a person *talking*, not a narrator performing.
+# The instruct model + optimize_instructions tends to over-act and drag the tempo, which reads as
+# the voice "slowing down". So (a) we only take the expressive path for genuinely strong beats
+# (STRONG_EMOTIONS below) — everything else uses the fast, natural plain voice — and (b) every
+# instruction below keeps a brisk conversational tempo. We describe *colour* (pitch, emphasis,
+# edge) but never tell it to slow down; "slow/deliberate/unhurried" is what made it drag.
 EMOTION_DIRECTION = {
-    "angry": "Speak with sharp, forceful anger; raised volume, hard emphasis, fast clipped pace.",
+    "angry": "Speak with sharp, forceful anger; raised volume, hard emphasis, quick clipped delivery.",
     "furious": "Speak with explosive fury; loud, biting, rapid, barely controlled.",
-    "cold": "Speak in a flat, cold, detached tone; low pitch, minimal inflection, deliberate pace.",
-    "tender": "Speak softly and warmly, gentle and intimate, slow with a soft breathy tone.",
+    "cold": "Speak flat and cold, detached; low pitch, minimal inflection, even tempo.",
+    "tender": "Speak softly and warmly, gentle and intimate, a soft breathy edge, natural tempo.",
     "warm": "Speak warmly and openly, relaxed and kind, easy natural rhythm.",
-    "sad": "Speak with quiet sadness; low, heavy, slow, a slight tremble.",
-    "grief": "Speak through grief; broken, halting, barely holding it together.",
+    "sad": "Speak with quiet sadness; low, heavy, a slight tremble, but keep it conversational.",
+    "grief": "Speak through grief; unsteady, catching, barely holding it together, still moving forward.",
     "anxious": "Speak with nervous anxiety; slightly fast, uneven rhythm, tense higher pitch.",
     "afraid": "Speak with fear; hushed, unsteady, quick shallow breaths between words.",
     "nervous": "Speak nervously; hesitant, uneven, a little too fast.",
     "playful": "Speak in a light, teasing, playful tone with a bright bouncy rhythm and a smile in the voice.",
-    "flirty": "Speak with a teasing, flirtatious lilt; warm, unhurried, a smile in the voice.",
+    "flirty": "Speak with a teasing, flirtatious lilt; warm, a smile in the voice.",
     "excited": "Speak with bright excitement; energetic, quick, rising intonation.",
     "joyful": "Speak with open joy; warm, buoyant, lively pace.",
-    "desperate": "Speak with raw desperation; urgent, straining, pleading emphasis.",
+    "desperate": "Speak with raw desperation; urgent, straining, pleading emphasis, driving forward.",
     "pleading": "Speak pleadingly; soft but urgent, rising, imploring.",
     "sarcastic": "Speak with dry sarcasm; flat exaggerated emphasis, a knowing edge.",
-    "menacing": "Speak with quiet menace; low, slow, controlled, dangerous calm.",
-    "commanding": "Speak with hard authority; firm, measured, weighted emphasis.",
-    "defeated": "Speak defeated; low, drained, slow, without energy.",
+    "menacing": "Speak with quiet menace; low, controlled, dangerous calm, unhurried but tight.",
+    "commanding": "Speak with hard authority; firm, weighted emphasis, decisive.",
+    "defeated": "Speak defeated; low, drained, flat, but keep it moving.",
     "hopeful": "Speak with cautious hope; gentle warmth, gradually lifting.",
     "confused": "Speak with uncertainty; searching, uneven, trailing intonation.",
     "tense": "Speak with held tension; tight, controlled, clipped.",
     "neutral": "Speak naturally and conversationally, grounded and in character.",
 }
 
+# Only these beats earn the (slower, more theatrical, higher-latency) expressive instruct voice.
+# Everything else — neutral, warm, playful, hopeful, an unlabelled line — stays on the fast plain
+# voice so an ordinary exchange never sounds like it's dragging. This is the main lever against
+# "the voice slows down unnecessarily": most lines simply don't take the expressive path anymore.
+STRONG_EMOTIONS = {
+    "angry", "furious", "grief", "sad", "desperate", "pleading", "menacing",
+    "afraid", "cold", "commanding", "defeated", "tender",
+}
+# Appended to every expressive instruction: the instruct model drifts slow without this.
+PACE_GUARD = " Keep a natural, unrushed conversational tempo — do not drag or over-enunciate."
+
 
 def emotion_to_instruction(emotion, tone=None):
     """Turn a one-word emotion (+ optional scene tone) into a concrete delivery instruction.
-    Returns None when there's nothing to say, so callers stay on the plain (non-instruct) path."""
+    Returns None when the beat isn't strong enough to warrant the expressive voice, so callers
+    stay on the fast, natural plain path (which is most of the time — see STRONG_EMOTIONS)."""
     e = (emotion or "").strip().lower()
-    if not e or e == "neutral":
-        base = EMOTION_DIRECTION["neutral"] if tone else None
-    else:
-        base = EMOTION_DIRECTION.get(e) or f"Speak with a distinctly {e} tone, in character; let it color pitch, pace, and emphasis."
-    if base and tone:
+    if e not in STRONG_EMOTIONS:
+        return None
+    base = EMOTION_DIRECTION.get(e) or f"Speak with a distinctly {e} tone, in character; let it colour pitch and emphasis."
+    if tone:
         base += f" Overall register: {str(tone).strip()}."
-    return base
+    return base + PACE_GUARD
 
 
 def _post(url, payload, headers=None, timeout=30):
@@ -153,11 +170,16 @@ def transcribe(audio_data_url, language="en"):
     return {"text": (msg.get("content") or "").strip(), "emotion": emotion, "usage": body.get("usage", {})}
 
 
-def costar_reply(scene, history, actor_line, actor_emotion=None):
-    """The AI scene-partner's turn. Given the scene setup, the dialogue so far, and the
-    actor's just-delivered line (+ detected emotion), stay in character and return ONE
-    spoken line — plus a private coaching note on the delivery (the 'tune' half of the
-    product). qwen-max, json out, short reply for low latency."""
+def costar_reply(scene, history, actor_line, actor_emotion=None, forced_line=None):
+    """The AI scene-partner's turn. Given the scene setup, the FULL dialogue so far, and the
+    actor's just-delivered line (+ detected emotion), stay in character and return ONE spoken
+    line — plus a private coaching note on the delivery (the 'tune' half of the product).
+
+    `forced_line`: scripted mode. When set, the co-star must deliver exactly these words (the
+    writer's next line for the character) — we don't let the model paraphrase. The model then
+    only picks the delivery emotion and writes the coaching note on the actor's line. This is
+    what makes 'compile a scene from the sides' a real read-through, not an improv approximation.
+    """
     ai_char = scene.get("ai_character", "the scene partner")
     human_char = scene.get("human_character", "the actor")
     system = (
@@ -165,37 +187,47 @@ def costar_reply(scene, history, actor_line, actor_emotion=None):
         f"the character '{ai_char}'. The actor auditioning plays '{human_char}'. "
         f"SCENE: {scene.get('premise', 'an unscripted improv')}. "
         f"TONE: {scene.get('tone', 'natural, grounded')}. "
+        # Continuity is the whole point of a scene partner: earlier beats have to inform this one.
+        "You remember EVERYTHING that has happened in this scene so far — the full exchange is "
+        "below, in order. Let what was already said shape your reply: build on it, pay off earlier "
+        "moments, call back to specifics, and never contradict what you've established or reset the "
+        "scene as if the previous lines didn't happen. "
         + (f"SCRIPT — follow it: deliver {ai_char}'s next line from this script, in order, staying on the "
            f"written words as closely as a natural performance allows. If the actor drifts, bridge briefly "
-           f"and steer back to the script. SCRIPT:\n{(scene.get('script') or '').strip()[:2500]}\n "
-           if (scene.get('script') or '').strip() else "") +
-        "Stay fully in character. Respond with ONE natural spoken line that reacts truthfully "
-        "to what the actor just said and keeps the scene alive — never narrate, never break "
-        "character, no stage directions inside the spoken line, no emojis. Match the scene's "
-        "emotional temperature; if the actor plays big, meet them; if they underplay, hold the "
-        "tension. Keep the line to one or two short sentences — say it in a breath — for a fast, "
-        "snappy exchange, unless a big moment earns more. "
+           f"and steer back to the script. SCRIPT:\n{(scene.get('script') or '').strip()[:3000]}\n "
+           if (scene.get('script') or '').strip() and not forced_line else "") +
+        (f"You MUST deliver EXACTLY this next scripted line, word for word, changing nothing: "
+         f"\"{forced_line}\". Put it verbatim in \"line\". "
+         if forced_line else
+         "Stay fully in character. Respond with ONE natural spoken line that reacts truthfully "
+         "to what the actor just said and keeps the scene alive — never narrate, never break "
+         "character, no stage directions inside the spoken line, no emojis. Match the scene's "
+         "emotional temperature; if the actor plays big, meet them; if they underplay, hold the "
+         "tension. Keep the line to one or two short sentences — say it in a breath — for a fast, "
+         "snappy exchange, unless a big moment earns more. ") +
         "SEPARATELY, as a casting-savvy reader, give a one-sentence private 'note' on the actor's "
         "delivery (specific and useful — pace, choice, listening, stakes), and rate 'stakes' 1-5. "
         "Respond ONLY as compact json: {\"line\": string, \"emotion\": one word for how you say it, "
         "\"note\": string, \"stakes\": integer 1-5}."
     )
     lines = [{"role": "system", "content": system}]
-    if scene.get("opening"):
-        lines.append({"role": "assistant", "content": json.dumps(
-            {"line": scene["opening"], "emotion": "neutral", "note": "", "stakes": 3})})
-    for turn in (history or [])[-8:]:                      # cap context; keep the last few beats
+    # Feed the whole scene back (capped generously) so the co-star truly has the conversation in
+    # mind, not just the last line. Assistant turns are the co-star's own past lines, plain text.
+    for turn in (history or [])[-40:]:
         role = "user" if turn.get("who") == "actor" else "assistant"
         lines.append({"role": role, "content": turn.get("text", "")})
     cue = actor_line + (f"  [delivered {actor_emotion}]" if actor_emotion else "")
     lines.append({"role": "user", "content": cue})
     body = _post(DASHSCOPE_URL, {"model": COSTAR_MODEL, "response_format": {"type": "json_object"},
-                                 "max_tokens": 120, "temperature": 0.8, "messages": lines})
+                                 "max_tokens": 160, "temperature": 0.4 if forced_line else 0.8,
+                                 "messages": lines})
     content = body["choices"][0]["message"]["content"]
     try:
         out = json.loads(content)
     except json.JSONDecodeError:
         out = {"line": content.strip()[:200], "emotion": "neutral", "note": "", "stakes": 3}
+    if forced_line:                       # never let a paraphrase through in scripted mode
+        out["line"] = forced_line
     out["_usage"] = body.get("usage", {})
     return out
 
@@ -209,7 +241,9 @@ def _tts_call(model, text, voice, instruction=None):
     inp = {"text": text, "voice": voice or TTS_VOICE, "language_type": TTS_LANG}
     if instruction:
         inp["instructions"] = instruction       # only qwen3-tts-instruct-flash reads this
-        inp["optimize_instructions"] = True      # let the model expand a terse instruction well
+        # optimize_instructions re-expands the cue and tends to over-act / slow the tempo, which is
+        # exactly the "voice drags" problem — our instructions are already concrete, so leave it off.
+        inp["optimize_instructions"] = False
     out = _post(TTS_SUBMIT, {"model": model, "input": inp, "parameters": {}}).get("output", {})
     audio = out.get("audio", {}) or {}
     if audio.get("data"):                                  # inline base64 (streamed models)
@@ -380,14 +414,63 @@ def avatar_status(task_id):
     return res
 
 
-def costar(scene, history, audio_data_url=None, text=None):
+# Theatre convention: a bare "Line!" (or "line please" / "what's my line") is not dialogue — it's
+# the actor calling for a prompt because they've gone up on their line. We only treat it as a cue
+# when the whole utterance is that call (a few short filler words allowed), never when "line" shows
+# up inside a real sentence ("draw a line", "hold the line"), so it can't hijack a scripted read.
+_LINE_CUE_WORDS = {"line", "lines", "please", "my", "whats", "what", "the", "is", "again",
+                   "call", "prompt", "next", "give", "me", "a", "im", "up", "on", "sorry"}
+
+
+def is_line_cue(text):
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    if not words or len(words) > 4 or "line" not in words:
+        return False
+    return all(w.replace("'", "") in _LINE_CUE_WORDS for w in words)
+
+
+def suggest_line(scene, history):
+    """Improv 'Line!': the actor is stuck, so pitch ONE natural line their character could say
+    next to keep the scene moving. Returns just the words (no note/coaching)."""
+    human_char = scene.get("human_character", "the actor")
+    system = (
+        f"You are a scene-partner AI helping an actor who just called 'Line!' — they're stuck and "
+        f"need a prompt. Suggest ONE short, natural line that the character '{human_char}' could say "
+        f"next to keep this scene alive and truthful. SCENE: {scene.get('premise', 'an improv')}. "
+        f"TONE: {scene.get('tone', 'grounded')}. Reply with ONLY the line itself — no quotes, no name, "
+        f"no explanation."
+    )
+    lines = [{"role": "system", "content": system}]
+    for turn in (history or [])[-20:]:
+        role = "assistant" if turn.get("who") == "actor" else "user"   # mirror: help THEM write
+        lines.append({"role": role, "content": turn.get("text", "")})
+    body = _post(DASHSCOPE_URL, {"model": COSTAR_MODEL, "max_tokens": 60,
+                                 "temperature": 0.8, "messages": lines})
+    return (body["choices"][0]["message"].get("content") or "").strip().strip('"').strip()
+
+
+def costar(scene, history, audio_data_url=None, text=None, forced_line=None, prompt_line=None):
     """One audition beat: hear the actor -> reply in character -> voice it.
-    `text` skips ASR entirely (the browser already transcribed the line) — the fast path."""
+    `text` skips ASR entirely (the browser already transcribed the line) — the fast path.
+    `forced_line`: scripted mode — the co-star must say exactly this (see costar_reply).
+    `prompt_line`: the actor's own next scripted line; if they call 'Line!', we feed them this
+    instead of taking a co-star turn (and don't advance the scene)."""
     if text is not None:
         heard = {"text": text, "emotion": None}
     else:
         heard = transcribe(audio_data_url, scene.get("language", "en"))
-    reply = costar_reply(scene, history, heard.get("text", ""), heard.get("emotion"))
+
+    # "Line!" — feed the actor their line (scripted) or suggest one (improv); no co-star turn.
+    if is_line_cue(heard.get("text", "")):
+        fed = (prompt_line or "").strip() or suggest_line(scene, history)
+        try:                                              # plain, unhurried prompter read
+            spoken = synthesize(fed, scene.get("voice") or TTS_VOICE)
+        except Exception as e:
+            spoken = None
+        return {"heard": heard, "prompt": True, "line": fed, "emotion": "neutral",
+                "note": "", "stakes": None, "audio": spoken}
+
+    reply = costar_reply(scene, history, heard.get("text", ""), heard.get("emotion"), forced_line)
     try:
         spoken = synthesize(reply.get("line", ""), scene.get("voice") or TTS_VOICE,
                             emotion=reply.get("emotion"), tone=scene.get("tone"))
@@ -478,7 +561,8 @@ class Handler(BaseHTTPRequestHandler):
             if not req.get("scene"):
                 return self._json(400, {"error": "missing 'scene'"})
             return self._json(200, costar(req["scene"], req.get("history") or [],
-                                          req.get("audio"), req.get("text")))
+                                          req.get("audio"), req.get("text"),
+                                          req.get("forced_line"), req.get("prompt_line")))
         except urllib.error.HTTPError as e:
             return self._json(502, {"error": "dashscope", "detail": e.read().decode()[:300]})
         except Exception as e:
