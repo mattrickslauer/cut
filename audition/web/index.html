@@ -22,29 +22,64 @@
     <!-- LEFT: scene setup -->
     <section class="panel setup">
       <div class="panel-label">SCENE</div>
-      <label class="field">
-        <span>Sides</span>
-        <select id="sceneSel"></select>
-      </label>
-      <div class="scene-card">
-        <div class="scene-row"><b>You play</b><span id="humanChar">—</span></div>
-        <div class="scene-row"><b>Reading with</b><span id="aiChar">—</span></div>
-        <p id="scenePremise" class="premise">—</p>
-        <p class="opening">Opens with: <em id="sceneOpening">—</em></p>
+
+      <div class="mode-toggle" id="modeToggle">
+        <button class="mode-btn active" data-mode="improv">Improv</button>
+        <button class="mode-btn" data-mode="scripted">From a script</button>
       </div>
-      <label class="field" style="margin-top:14px">
-        <span>Script to follow <em>(optional)</em></span>
-        <textarea id="scriptBox" rows="4" placeholder="Paste the sides — the co-star follows its lines. Leave blank to improvise from the premise."></textarea>
-      </label>
+
+      <!-- IMPROV: pick a premade scene -->
+      <div id="improvSetup">
+        <label class="field">
+          <span>Sides</span>
+          <select id="sceneSel"></select>
+        </label>
+        <div class="scene-card">
+          <div class="scene-row"><b>You play</b><span id="humanChar">—</span></div>
+          <div class="scene-row"><b>Reading with</b><span id="aiChar">—</span></div>
+          <p id="scenePremise" class="premise">—</p>
+          <p class="opening">Opens with: <em id="sceneOpening">—</em></p>
+        </div>
+      </div>
+
+      <!-- SCRIPTED: paste sides, pick who you are -->
+      <div id="scriptSetup" hidden>
+        <label class="field">
+          <span>Paste your sides</span>
+          <textarea id="scriptBox" rows="7" placeholder="One line per character, NAME first:
+
+MAYA: I didn't think you still knew this place existed.
+JAMIE: I never forgot it. I just… stopped coming.
+MAYA: (quietly) That's not the same thing.
+
+Then choose which part is yours — the reader performs every other line."></textarea>
+        </label>
+        <div id="scriptMeta" class="script-meta" hidden>
+          <label class="field">
+            <span>Your part</span>
+            <select id="roleSel"></select>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="hideLines" />
+            <span>Hide my lines (memorize — call <b>“Line!”</b> when stuck)</span>
+          </label>
+          <p class="script-count mono" id="scriptCount"></p>
+        </div>
+        <p class="script-empty muted" id="scriptEmpty">Paste a scene above to compile it into a read-through.</p>
+      </div>
+
       <div class="controls">
         <button id="startBtn" class="primary">Start audition</button>
-        <button id="stopBtn" class="stop" disabled>■ Stop</button>
-        <button id="newTakeBtn" class="ghost" disabled>↺ New take</button>
-        <button id="saveBtn" class="ghost" disabled>⬇ Save take</button>
+        <button id="stopBtn" class="stop" disabled>■ Stop &amp; review</button>
+        <div class="controls-row">
+          <button id="newTakeBtn" class="ghost" disabled>↺ New take</button>
+          <button id="saveBtn" class="ghost" disabled>⬇ Save</button>
+        </div>
+        <button id="resetBtn" class="ghost reset">⟲ Reset — start over</button>
       </div>
-      <p class="hint mono">Once you start, just act — it hears when you finish and replies.
-        If it misses your ending, press <b>Space</b> or tap the video to send. Camera
-        previews on load. Reader is scale-to-zero on Alibaba FC.</p>
+      <p class="hint mono">Just act — it hears when you finish and replies. If it misses your
+        ending, press <b>Space</b> or tap the video. In a script, say <b>“Line!”</b> (on its own)
+        and the reader feeds you your line. Camera previews on load.</p>
     </section>
 
     <!-- CENTER: the self-tape -->
@@ -54,15 +89,30 @@
         <video id="playback" class="playback" playsinline controls hidden></video>
         <div id="camOff" class="cam-off"><p>Camera off</p></div>
         <div id="pill" class="pill idle">Press <b>Start audition</b></div>
+        <div id="linePrompt" class="line-prompt" hidden></div>
         <div class="meter"><i id="meterFill"></i></div>
         <div id="subtitle" class="subtitle"></div>
         <div id="whoSpoke" class="who-spoke"></div>
+        <button id="lineBtn" class="line-btn" hidden title="Feed me my line">Line!</button>
+      </div>
+      <!-- review bar: shown after Stop, over the take -->
+      <div id="reviewBar" class="review-bar" hidden>
+        <div class="review-title"><b id="reviewTake">Take 1</b> — director’s cut</div>
+        <div class="review-actions">
+          <button id="replayBtn" class="ghost">▶ Replay</button>
+          <button id="reNewTakeBtn" class="primary sm">↺ New take</button>
+          <button id="reSaveBtn" class="ghost">⬇ Save</button>
+        </div>
       </div>
       <audio id="player" hidden></audio>
     </section>
 
-    <!-- RIGHT: transcript + the "tune" notes -->
+    <!-- RIGHT: teleprompter (scripted) + transcript + the "tune" notes -->
     <section class="panel side">
+      <div id="tpWrap" class="tp-wrap" hidden>
+        <div class="panel-label">TELEPROMPTER <span class="tag" id="tpProgress">0 / 0</span></div>
+        <div id="teleprompter" class="teleprompter"></div>
+      </div>
       <div class="panel-label">THE SCENE <span id="takeTag" class="tag">take 1</span></div>
       <div id="dialogue" class="dialogue"></div>
       <div class="panel-label" style="margin-top:14px">READER'S NOTES <span class="tag cut">tune</span></div>

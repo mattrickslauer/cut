@@ -3,6 +3,12 @@
 // silence, POSTs the turn to the scale-to-zero FC reader, plays the reply, then hands the
 // scene back to you. One POST = one acting beat.
 //
+// Two modes:
+//   improv   — pick a premade scene; the reader improvises in character (full-scene memory).
+//   scripted — paste your sides, pick your part; the reader performs every OTHER part
+//              VERBATIM, in order (a real read-through). A teleprompter tracks progress, and
+//              saying "Line!" on its own feeds you your next line.
+//
 // State machine:  LISTENING → HEARING(you talk) → THINKING(POST /costar) → SPEAKING(reply) → LISTENING
 
 // Deployed cut-audition FC function (scale-to-zero, ap-southeast-1). For local dev,
@@ -41,28 +47,42 @@ const SCENES = [
     tone:'natural, grounded, discovery', voice:'Elias',         // measured male
     opening:"You're early. That's either very good or very bad." },
 ];
+// Voice for a scripted read (the sides don't carry one). Neutral, natural, unhurried.
+const SCRIPT_VOICE = 'Elias';
+const SCRIPT_TONE  = 'natural, grounded, truthful';
 
 const el = id => document.getElementById(id);
 const $ = {
   sceneSel:el('sceneSel'), humanChar:el('humanChar'), aiChar:el('aiChar'),
   premise:el('scenePremise'), opening:el('sceneOpening'), scriptBox:el('scriptBox'),
-  startBtn:el('startBtn'), stopBtn:el('stopBtn'), newTakeBtn:el('newTakeBtn'), saveBtn:el('saveBtn'),
+  improvSetup:el('improvSetup'), scriptSetup:el('scriptSetup'), modeToggle:el('modeToggle'),
+  scriptMeta:el('scriptMeta'), scriptEmpty:el('scriptEmpty'), scriptCount:el('scriptCount'),
+  roleSel:el('roleSel'), hideLines:el('hideLines'),
+  startBtn:el('startBtn'), stopBtn:el('stopBtn'), newTakeBtn:el('newTakeBtn'),
+  saveBtn:el('saveBtn'), resetBtn:el('resetBtn'),
   cam:el('cam'), camOff:el('camOff'), pill:el('pill'), meterFill:el('meterFill'),
   subtitle:el('subtitle'), whoSpoke:el('whoSpoke'), dialogue:el('dialogue'),
   notesList:el('notesList'), stakes:document.querySelectorAll('.stakes i'),
   recDot:el('recDot'), sessionTime:el('sessionTime'), takeTag:el('takeTag'), player:el('player'),
-  playback:el('playback'),
+  playback:el('playback'), linePrompt:el('linePrompt'), lineBtn:el('lineBtn'),
+  tpWrap:el('tpWrap'), teleprompter:el('teleprompter'), tpProgress:el('tpProgress'),
+  reviewBar:el('reviewBar'), reviewTake:el('reviewTake'),
+  replayBtn:el('replayBtn'), reNewTakeBtn:el('reNewTakeBtn'), reSaveBtn:el('reSaveBtn'),
 };
 
 const S = {
-  scene:null, history:[], take:1, state:'idle',           // idle|listening|hearing|thinking|speaking
+  scene:null, mode:'improv', history:[], take:1, state:'idle',   // idle|listening|hearing|thinking|speaking
   stream:null, audioCtx:null, node:null, source:null, srcRate:48000,
   ring:[], buffer:[], bufLen:0, onset:0, silenceMs:0, speechMs:0, lineMs:0,
   recorder:null, chunks:[], sessionStart:0, timer:0,
   cues:[], recordStart:0, playbackUrl:null,               // co-star caption cues for playback overlay
   mixDest:null, playerSrc:null,                           // Web Audio: mic + reader voice → recording
   canvas:null, cctx:null, rafId:0, costarShot:{who:'',line:''},   // director's-cut compositor
+  // scripted mode
+  script:[], scriptChars:[], userChar:null, cursor:0, revealed:false, onSpoken:null,
 };
+
+const uc = s => (s || '').trim().toUpperCase();
 
 // Persistent audio graph. Created once (createMediaElementSource can bind $.player only
 // once, ever), reused across takes: mic + the reader's TTS voice are mixed into mixDest,
@@ -77,10 +97,6 @@ function ensureAudioGraph(){
 }
 
 // ---- director's-cut compositor -----------------------------------------
-// We don't record the raw camera. We record a CANVAS that cuts between your shot
-// (camera, on your turns) and the co-star's shot (a card with their line, on their
-// turns), letterboxed. The recorder is paused during "thinking" (setState), so the
-// AI's latency never enters the video → a tight, coherent edited scene.
 function ensureCanvas(){
   if (S.canvas) return;
   S.canvas = document.createElement('canvas'); S.canvas.width = 1280; S.canvas.height = 720;
@@ -117,8 +133,7 @@ function drawFrame(){
   c.fillStyle='#000'; c.fillRect(0,0,W,bar); c.fillRect(0,H-bar,W,bar);   // letterbox
 }
 
-// arm a fresh recorder (own chunks array). Records the COMPOSITED canvas + mixed audio
-// (your mic + the reader's voice), so the tape is the edited two-shot with the voice in it.
+// arm a fresh recorder (own chunks array). Records the COMPOSITED canvas + mixed audio.
 function armRecorder(){
   ensureCanvas();
   const cv = S.canvas.captureStream(30);
@@ -130,8 +145,9 @@ function armRecorder(){
   S.recorder = rec; S.chunks = chunks;
   return rec;
 }
+function pickMime(){ for (const m of ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']) if (MediaRecorder.isTypeSupported(m)) return {mimeType:m}; return {}; }
 
-// ---- scene picker -------------------------------------------------------
+// ---- mode + scene picker ------------------------------------------------
 function fillScenes(){
   SCENES.forEach((s,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent=s.title; $.sceneSel.appendChild(o); });
   $.sceneSel.onchange = ()=>selectScene(+$.sceneSel.value);
@@ -142,20 +158,120 @@ function selectScene(i){
   $.humanChar.textContent = s.human_character; $.aiChar.textContent = s.ai_character;
   $.premise.textContent = s.premise; $.opening.textContent = '"'+s.opening+'"';
 }
+function setMode(mode){
+  if (S.state !== 'idle') return;                    // don't switch mid-take
+  S.mode = mode;
+  [...$.modeToggle.children].forEach(b=> b.classList.toggle('active', b.dataset.mode===mode));
+  $.improvSetup.hidden = mode !== 'improv';
+  $.scriptSetup.hidden = mode !== 'scripted';
+  if (mode === 'scripted') parseScriptBox();
+  $.tpWrap.hidden = true;
+}
+[...$.modeToggle.children].forEach(b => b.onclick = ()=>setMode(b.dataset.mode));
+
+// ---- script parsing -----------------------------------------------------
+// Sides come in as "NAME: line", one speaker per block; a line with no "NAME:" continues the
+// previous speaker; a blank line breaks the block. Parentheticals — (quietly), [beat] — are
+// stage directions, stripped from the spoken words. We keep it forgiving: real sides are messy.
+const NAME_RE = /^\s*([A-Za-z][A-Za-z0-9 .'’\-]{0,28}?)\s*[:：]\s*(.*)$/;
+function stripDirections(t){ return (t||'').replace(/\([^)]*\)/g,'').replace(/\[[^\]]*\]/g,'').replace(/\s+/g,' ').trim(); }
+function looksLikeName(raw){
+  const n = raw.trim(); if (!n || n.length > 24) return false;
+  if (n.split(/\s+/).length > 4) return false;              // "Later that night:" is not a cue
+  const letters = n.replace(/[^A-Za-z]/g,'');
+  if (!letters) return false;
+  const caps = (n.match(/[A-Z]/g)||[]).length;
+  return caps >= letters.length * 0.6 || /^[A-Z]/.test(n); // ALLCAPS cue, or a Capitalized name
+}
+function parseScript(raw){
+  const out = []; let cur = null;
+  for (const rawLine of (raw||'').split(/\r?\n/)){
+    if (!rawLine.trim()){ cur = null; continue; }
+    const m = rawLine.match(NAME_RE);
+    if (m && looksLikeName(m[1])){
+      cur = { char: m[1].trim().replace(/\s+/g,' '), text: stripDirections(m[2]) };
+      out.push(cur);
+    } else if (cur){
+      const more = stripDirections(rawLine);
+      if (more) cur.text = (cur.text + ' ' + more).trim();
+    }
+  }
+  return out.filter(e => e.text);
+}
+function parseScriptBox(){
+  S.script = parseScript($.scriptBox.value);
+  const seen = new Set(); S.scriptChars = [];
+  for (const e of S.script){ const k = uc(e.char); if (!seen.has(k)){ seen.add(k); S.scriptChars.push(e.char); } }
+  const ok = S.script.length && S.scriptChars.length >= 2;
+  $.scriptMeta.hidden = !ok;
+  $.scriptEmpty.hidden = !!ok || !$.scriptBox.value.trim();
+  if (!ok){
+    $.scriptEmpty.hidden = false;
+    $.scriptEmpty.textContent = !$.scriptBox.value.trim()
+      ? 'Paste a scene above to compile it into a read-through.'
+      : 'Couldn’t find at least two named parts (use "NAME: line"). Check the format above.';
+    return;
+  }
+  // populate the "your part" dropdown, preserving the current pick if still valid
+  const prev = $.roleSel.value;
+  $.roleSel.innerHTML = '';
+  S.scriptChars.forEach(c => { const o=document.createElement('option'); o.value=c; o.textContent=c; $.roleSel.appendChild(o); });
+  $.roleSel.value = S.scriptChars.includes(prev) ? prev : S.scriptChars[0];
+  S.userChar = $.roleSel.value;
+  const mine = S.script.filter(e => uc(e.char)===uc(S.userChar)).length;
+  $.scriptCount.textContent = `${S.script.length} lines · ${S.scriptChars.length} parts · you have ${mine}`;
+}
+$.scriptBox.addEventListener('input', parseScriptBox);
+$.roleSel.addEventListener('change', ()=>{ S.userChar = $.roleSel.value;
+  const mine = S.script.filter(e => uc(e.char)===uc(S.userChar)).length;
+  $.scriptCount.textContent = `${S.script.length} lines · ${S.scriptChars.length} parts · you have ${mine}`; });
+$.hideLines.addEventListener('change', renderTeleprompter);
+
+function isUserLine(i){ const e = S.script[i]; return e && uc(e.char) === uc(S.userChar); }
+function costarVoice(){ return S.mode === 'scripted' ? SCRIPT_VOICE : (S.scene ? S.scene.voice : SCRIPT_VOICE); }
+
+// ---- teleprompter -------------------------------------------------------
+function renderTeleprompter(){
+  if (S.mode !== 'scripted' || !S.script.length){ $.tpWrap.hidden = true; return; }
+  $.tpWrap.hidden = false;
+  $.teleprompter.innerHTML = '';
+  S.script.forEach((e,i)=>{
+    const mine = uc(e.char) === uc(S.userChar);
+    const row = document.createElement('div');
+    let cls = 'tp-line ' + (mine ? 'mine' : 'other');
+    if (i < S.cursor) cls += ' done';
+    else if (i === S.cursor && S.state !== 'idle') cls += ' current';
+    row.className = cls;
+    const masked = mine && $.hideLines.checked && i >= S.cursor && !(i === S.cursor && S.revealed);
+    const nm = document.createElement('span'); nm.className='tp-name'; nm.textContent = e.char.split(',')[0];
+    const tx = document.createElement('span'); tx.className='tp-text';
+    tx.textContent = masked ? '— your line —' : e.text;
+    if (masked) tx.classList.add('masked');
+    row.appendChild(nm); row.appendChild(tx);
+    $.teleprompter.appendChild(row);
+  });
+  const done = Math.min(S.cursor, S.script.length);
+  $.tpProgress.textContent = `${done} / ${S.script.length}`;
+  const cur = $.teleprompter.querySelector('.current') || $.teleprompter.querySelector('.tp-line:not(.done)');
+  if (cur) cur.scrollIntoView({ block:'center', behavior:'smooth' });
+}
 
 // ---- state --------------------------------------------------------------
 function setState(st){
   S.state = st;
-  const ai = S.scene ? S.scene.ai_character.split(',')[0] : 'Reader';
+  const ai = S.mode === 'scripted'
+    ? (S.script[S.cursor] && !isUserLine(S.cursor) ? S.script[S.cursor].char.split(',')[0] : 'Reader')
+    : (S.scene ? S.scene.ai_character.split(',')[0] : 'Reader');
   $.pill.className = 'pill ' + st;
   $.pill.innerHTML = ({
     idle:'Press <b>Start audition</b>',
-    listening:'🎧 Your turn — act (Space / tap when done)',
+    listening: (S.mode==='scripted' ? '🎧 Your line — act it (or say “Line!”)' : '🎧 Your turn — act (Space / tap when done)'),
     hearing:'Hearing you…',
     thinking:'Reader responding…',
     speaking: ai + ' is speaking',
   })[st] || st;
   $.recDot.className = 'rec-dot ' + (st==='idle' ? 'off' : 'on');
+  $.lineBtn.hidden = !(S.mode==='scripted' && st==='listening');
   // edit out the AI's latency: don't record the "thinking" gap into the tape
   if (S.recorder){
     if (st === 'thinking' && S.recorder.state === 'recording'){ try { S.recorder.pause(); } catch(_){} }
@@ -165,7 +281,16 @@ function setState(st){
 
 // ---- start --------------------------------------------------------------
 $.startBtn.onclick = async () => {
+  if (S.mode === 'scripted'){
+    parseScriptBox();
+    if (!(S.script.length && S.scriptChars.length >= 2)){
+      $.pill.className='pill idle'; $.pill.textContent = 'Paste a scene with at least two parts first';
+      return;
+    }
+    S.userChar = $.roleSel.value || S.scriptChars[0];
+  }
   try {
+    hideReview();
     setState('idle'); $.pill.textContent = 'Starting…';
     try { $.playback.pause(); } catch(_){}                 // leaving playback → back to live
     $.playback.hidden = true; $.cam.style.display = '';
@@ -199,32 +324,22 @@ $.stopBtn.onclick = () => {
     try { S.stream && S.stream.getTracks().forEach(t => t.stop()); } catch(_){}
     S.stream = S.node = S.source = null; S.state = 'idle';  // keep audioCtx/mixDest/playerSrc for next take
     $.subtitle.textContent = ''; $.whoSpoke.textContent = ''; $.meterFill.style.width = '0';
-    $.recDot.className = 'rec-dot off';
-    if (S.chunks && S.chunks.length){                       // play back the director's cut
-      if (S.playbackUrl) URL.revokeObjectURL(S.playbackUrl);
-      S.playbackUrl = URL.createObjectURL(new Blob(S.chunks, { type:'video/webm' }));
-      $.cam.style.display = 'none'; $.camOff.style.display = 'none';
-      $.playback.src = S.playbackUrl; $.playback.hidden = false; $.playback.ontimeupdate = null;
-      $.pill.className = 'pill idle'; $.pill.innerHTML = '▶ Take ' + S.take + ' — director’s cut';
-      $.playback.play().catch(()=>{});                      // the cut already has the shots, captions + voice baked in
-      $.saveBtn.disabled = false;                           // let them keep the take
-    } else {
-      $.cam.srcObject = null; $.camOff.style.display = ''; setState('idle'); $.saveBtn.disabled = true;
-    }
+    $.recDot.className = 'rec-dot off'; $.lineBtn.hidden = true; hideLinePrompt();
+    if (S.chunks && S.chunks.length){ showReview(); }       // proper review of the director's cut
+    else { $.cam.srcObject = null; $.camOff.style.display = ''; setState('idle'); $.saveBtn.disabled = true; }
     $.startBtn.disabled = false; $.stopBtn.disabled = true; $.newTakeBtn.disabled = true;
   };
   if (S.recorder && S.recorder.state !== 'inactive'){ S.recorder.onstop = finish; try { S.recorder.stop(); } catch(_){ finish(); } }
   else finish();
 };
-function pickMime(){ for (const m of ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']) if (MediaRecorder.isTypeSupported(m)) return {mimeType:m}; return {}; }
 
 function beginTake(first){
   stopSR(); try { $.player.pause(); } catch(_){}      // cancel any in-flight turn from the previous take
-  S.history = []; S.take = first ? 1 : S.take + 1;
+  hideLinePrompt();
+  S.history = []; S.take = first ? 1 : S.take + 1; S.cursor = 0; S.revealed = false;
   $.takeTag.textContent = 'take ' + S.take;
   $.dialogue.innerHTML = ''; setStakes(0);
   $.notesList.innerHTML = '<p class="muted">Notes on your delivery appear here after each line.</p>';
-  // start a clean recording for this take (t=0): composite canvas + mixed audio
   ensureCanvas(); if (!S.rafId) S.rafId = requestAnimationFrame(drawFrame);
   try { S.recorder && S.recorder.state !== 'inactive' && S.recorder.stop(); } catch(_){}
   armRecorder(); S.cues = [];
@@ -232,39 +347,59 @@ function beginTake(first){
   S.recordStart = performance.now();
   S.sessionStart = performance.now(); startTimer();
   resetCapture();
-  if (currentScript()){                                                 // scripted: you start from the sides
-    resumeListening();
-  } else {                                                              // improv: the reader opens
+  if (S.mode === 'scripted'){
+    renderTeleprompter();
+    scriptedAdvance();                                                  // play leading reader lines, then your turn
+  } else {
+    $.tpWrap.hidden = true;
     addTurn('costar', S.scene.ai_character, S.scene.opening);
     S.history.push({ who:'costar', text:S.scene.opening });
-    say(S.scene.ai_character, S.scene.opening);
+    say(S.scene.ai_character, S.scene.opening, null, resumeListening);
   }
 }
-function currentScript(){ return ($.scriptBox.value || '').trim(); }
 $.newTakeBtn.onclick = () => { if (S.state==='thinking') return; beginTake(false); };
 
+// ---- reset — full start-over --------------------------------------------
+function resetAll(){
+  stopSR();
+  try { $.player.pause(); } catch(_){}
+  try { $.playback.pause(); } catch(_){}
+  clearInterval(S.timer);
+  cancelAnimationFrame(S.rafId); S.rafId = 0;
+  try { S.recorder && S.recorder.state !== 'inactive' && S.recorder.stop(); } catch(_){}
+  try { S.node && S.node.disconnect(); S.source && S.source.disconnect(); } catch(_){}
+  try { S.stream && S.stream.getTracks().forEach(t => t.stop()); } catch(_){}
+  S.stream = S.node = S.source = null; S.recorder = null; S.chunks = [];
+  S.history = []; S.cursor = 0; S.revealed = false; S.take = 1; S.state = 'idle';
+  if (S.playbackUrl){ URL.revokeObjectURL(S.playbackUrl); S.playbackUrl = null; }
+  hideReview(); hideLinePrompt();
+  $.playback.hidden = true; $.playback.src = '';
+  $.dialogue.innerHTML = ''; setStakes(0);
+  $.notesList.innerHTML = '<p class="muted">Notes on your delivery appear here after each line.</p>';
+  $.subtitle.textContent = ''; $.whoSpoke.textContent = ''; $.meterFill.style.width = '0';
+  $.takeTag.textContent = 'take 1'; $.sessionTime.textContent = '00:00';
+  $.startBtn.disabled = false; $.stopBtn.disabled = true;
+  $.newTakeBtn.disabled = true; $.saveBtn.disabled = true;
+  $.cam.style.display = ''; $.camOff.style.display = 'none';
+  setState('idle');
+  renderTeleprompter();
+  if (!S.stream) initCamera();                             // re-preview the webcam
+}
+$.resetBtn.onclick = resetAll;
+
 // ---- turn detection -----------------------------------------------------
-// Primary: the browser's SpeechRecognition — it transcribes as you talk, so the
-// transcript is ready the instant you stop. We POST *text*, and the reader only does
-// reply + TTS (~3s) instead of ASR + reply + TTS (~6s). Fallback: the energy-VAD below
-// uploads audio for server ASR (browsers without SpeechRecognition, e.g. Firefox).
 const SR_CLASS = window.SpeechRecognition || window.webkitSpeechRecognition;
-// SpeechRecognition contends with the camera/mic capture in Chrome — it gets no audio and
-// stalls in "listening". Default OFF: use the reliable energy-VAD on our own mic stream,
-// with a manual "done" fallback. (Set true only if you drop the recorder/Web-Audio mic use.)
-const USE_SR = false;
+const USE_SR = false;   // energy-VAD on our own mic stream is the reliable default (see README)
 
 function resetCapture(){ S.buffer=[]; S.bufLen=0; S.onset=0; S.silenceMs=0; S.speechMs=0; S.lineMs=0; }
-
-// hand the scene back to the actor
-function resumeListening(){ resetCapture(); setState('listening'); if (USE_SR) startSR(); }
+function resumeListening(){ resetCapture(); setState('listening'); renderTeleprompter(); if (USE_SR) startSR(); }
 
 // send the buffered line — called by auto-endpoint AND the manual "done" (space / tap video)
 function finishLine(){
   if (S.state !== 'hearing') return;                     // only when you've actually started talking
   const wav = encodeWav(flatten(S.buffer, S.bufLen), S.srcRate);
   resetCapture();
-  runTurn({ audio: wav });
+  handleTurn({ audio: wav });
 }
 function manualDone(){ if (S.state === 'hearing') finishLine(); }
 
@@ -276,13 +411,12 @@ function startSR(){
   rec.onresult = e => {
     let interim=''; finalText='';
     for (const res of e.results){ res.isFinal ? (finalText += res[0].transcript) : (interim += res[0].transcript); }
-    if ((interim || finalText) && S.state === 'listening') setState('hearing');   // you started talking
+    if ((interim || finalText) && S.state === 'listening') setState('hearing');
   };
   rec.onend = () => {
-    if (S.state !== 'listening' && S.state !== 'hearing') return;   // stopped / already in a turn
+    if (S.state !== 'listening' && S.state !== 'hearing') return;
     const t = finalText.trim();
-    if (t) runTurn({ text: t });                                    // your line is ready → reply
-    else startSR();                                                 // heard nothing → keep listening
+    if (t) handleTurn({ text: t }); else startSR();
   };
   rec.onerror = ev => {
     if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') return;
@@ -292,13 +426,13 @@ function startSR(){
 }
 function stopSR(){ try { if (S.recog){ S.recog.onend = S.recog.onerror = null; S.recog.abort(); S.recog = null; } } catch(_){} }
 
-// energy-VAD fallback (also drives the live level meter in both modes)
+// energy-VAD (also drives the live level meter)
 function onAudio(e){
   const blk = e.inputBuffer.getChannelData(0);
   let sum=0; for (let i=0;i<blk.length;i++) sum += blk[i]*blk[i];
   const rms = Math.sqrt(sum/blk.length);
-  $.meterFill.style.width = Math.min(100, rms*450) + '%';          // live level (always)
-  if (USE_SR) return;                                              // SR drives turns; audio only feeds the meter
+  $.meterFill.style.width = Math.min(100, rms*450) + '%';
+  if (USE_SR) return;
   const ms = (blk.length / S.srcRate) * 1000;
   if (S.state !== 'listening' && S.state !== 'hearing') return;
   S.ring.push(new Float32Array(blk)); if (S.ring.length > PREROLL) S.ring.shift();
@@ -312,12 +446,15 @@ function onAudio(e){
   S.buffer.push(new Float32Array(blk)); S.bufLen += blk.length; S.lineMs += ms;
   if (rms < END_RMS) S.silenceMs += ms; else { S.silenceMs = 0; S.speechMs += ms; }
   if (S.silenceMs >= END_SILENCE_MS || S.lineMs >= MAX_LINE_MS){
-    if (S.speechMs < MIN_SPEECH_MS){ resetCapture(); setState('listening'); return; }  // false trigger — keep listening
+    if (S.speechMs < MIN_SPEECH_MS){ resetCapture(); setState('listening'); return; }
     finishLine();
   }
 }
 
-// ---- one beat: POST /costar (text or audio) → render → reader speaks → resume ----
+// ---- one beat -----------------------------------------------------------
+function handleTurn(extra){ return S.mode === 'scripted' ? scriptedRunTurn(extra) : runTurn(extra); }
+
+// IMPROV: POST /costar → reply (with full-scene memory) → reader speaks → resume
 async function runTurn(extra){
   setState('thinking');
   const thinking = addTurn('costar', S.scene.ai_character, '…', true);
@@ -328,51 +465,141 @@ async function runTurn(extra){
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
     thinking.remove();
+    if (data.prompt){ feedLine(data, resumeListening); return; }   // they called "Line!" — suggest one
     const heard = (data.heard && data.heard.text) || extra.text || '(unclear)';
     addTurn('actor', 'You', heard); S.history.push({ who:'actor', text:heard });
     addTurn('costar', S.scene.ai_character, data.line); S.history.push({ who:'costar', text:data.line });
     if (data.note) addNote(heard, data.note);
     if (data.stakes) setStakes(data.stakes);
-    say(S.scene.ai_character, data.line, data.audio);      // speak, then resume listening
+    say(S.scene.ai_character, data.line, data.audio, resumeListening);
   } catch (e) {
     thinking.remove();
     $.pill.textContent = 'Reader error: ' + e.message; $.pill.className = 'pill idle';
-    setTimeout(resumeListening, 1400);                     // recover, keep the scene alive
+    setTimeout(resumeListening, 1400);
   }
 }
 
-// speak a co-star line, then hand the turn back. If we weren't handed audio
-// (e.g. the opening line), synthesize it via /say so the whole scene is voiced.
-async function say(who, line, audioUri){
+// SCRIPTED: walk the sides. Reader lines are delivered VERBATIM, in order; your lines you perform.
+function scriptedAdvance(){
+  if (S.state === 'idle') return;
+  if (S.cursor >= S.script.length){ return scriptedComplete(); }
+  if (isUserLine(S.cursor)){ resumeListening(); return; }              // your turn
+  const e = S.script[S.cursor];                                        // a reader line → say it verbatim
+  addTurn('costar', e.char, e.text); S.history.push({ who:'costar', text:e.text });
+  S.costarShot = { who: e.char.split(',')[0], line: e.text };
+  say(e.char, e.text, null, ()=>{ S.cursor++; renderTeleprompter(); scriptedAdvance(); });
+}
+
+async function scriptedRunTurn(extra){
+  setState('thinking');
+  const userEntry = S.script[S.cursor];
+  const nextIdx = S.cursor + 1;
+  const nextCostar = (nextIdx < S.script.length && !isUserLine(nextIdx)) ? S.script[nextIdx] : null;
+  const thinking = addTurn('costar', nextCostar ? nextCostar.char : 'Reader', '…', true);
+  try {
+    const r = await fetch(BACKEND_URL + '/costar', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(Object.assign({
+        scene: sceneForApi(), history: S.history,
+        forced_line: nextCostar ? nextCostar.text : undefined,
+        prompt_line: userEntry ? userEntry.text : undefined,
+      }, extra)) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || ('HTTP '+r.status));
+    thinking.remove();
+    if (data.prompt){ feedLine(data, resumeListening); return; }       // "Line!" — feed your line, stay put
+    const heard = (data.heard && data.heard.text) || extra.text || (userEntry ? userEntry.text : '(unclear)');
+    addTurn('actor', 'You', heard); S.history.push({ who:'actor', text:heard });
+    if (data.note) addNote(heard, data.note);
+    if (data.stakes) setStakes(data.stakes);
+    S.cursor++; renderTeleprompter();                                  // past your line
+    if (nextCostar){
+      addTurn('costar', nextCostar.char, data.line); S.history.push({ who:'costar', text:data.line });
+      S.costarShot = { who: nextCostar.char.split(',')[0], line: data.line };
+      say(nextCostar.char, data.line, data.audio, ()=>{ S.cursor++; renderTeleprompter(); scriptedAdvance(); });
+    } else {
+      scriptedAdvance();                                               // no reader line follows
+    }
+  } catch (e) {
+    thinking.remove();
+    $.pill.textContent = 'Reader error: ' + e.message; $.pill.className = 'pill idle';
+    setTimeout(()=>{ S.state==='idle' || resumeListening(); }, 1400);
+  }
+}
+
+function scriptedComplete(){
+  S.state = 'idle';
+  $.pill.className = 'pill idle';
+  $.pill.innerHTML = '🎬 Scene complete — <b>Stop &amp; review</b> or <b>New take</b>';
+  $.lineBtn.hidden = true; $.meterFill.style.width = '0';
+  renderTeleprompter();
+}
+
+// feed the actor a line (scripted: their next line; improv: a suggestion). Doesn't advance
+// the scene and isn't baked into the tape — it's a coaching prompt, not part of the take.
+function feedLine(data, after){
+  const line = data.line || (S.script[S.cursor] ? S.script[S.cursor].text : '');
+  S.revealed = true; renderTeleprompter();
+  showLinePrompt(line);
+  const wasRec = S.recorder && S.recorder.state === 'recording';
+  if (wasRec){ try { S.recorder.pause(); } catch(_){} }                // keep the prompt out of the cut
+  const back = () => { S.revealed = false; hideLinePrompt();
+    if (wasRec && S.recorder && S.recorder.state === 'paused'){ try { S.recorder.resume(); } catch(_){} }
+    (after || resumeListening)(); };
+  // speak it plainly (prompter voice), without touching costarShot/subtitle framing
+  if (data.audio){ $.player.src = data.audio; $.player.onended = back; $.player.play().catch(back); }
+  else { fetchSay(line).then(a => { if (a){ $.player.src=a; $.player.onended=back; $.player.play().catch(back); } else back(); }); }
+}
+// manual "Line!" button — same feed without needing to speak the word
+async function manualLine(){
+  if (S.mode !== 'scripted' || S.state !== 'listening') return;
+  const line = S.script[S.cursor] ? S.script[S.cursor].text : '';
+  if (!line) return;
+  stopSR(); setState('thinking'); $.pill.textContent = 'Feeding your line…';
+  const audio = await fetchSay(line);
+  feedLine({ line, audio }, resumeListening);
+}
+$.lineBtn.onclick = manualLine;
+
+async function fetchSay(line){
+  try {
+    const r = await fetch(BACKEND_URL + '/say', { method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text: line, voice: costarVoice() }) });
+    const d = await r.json(); return (r.ok && d.audio) ? d.audio : null;
+  } catch(_){ return null; }
+}
+
+// speak a co-star line, then run `after` (default: hand the turn back). If no audio was handed
+// in (opening / verbatim reader line), synthesize it via /say so the whole scene is voiced.
+async function say(who, line, audioUri, after){
+  const cont = after || resumeListening;
   $.subtitle.textContent = line;
   $.whoSpoke.textContent = who.split(',')[0];
-  S.costarShot = { who: who.split(',')[0], line };         // what the co-star's canvas shot shows
+  S.costarShot = { who: who.split(',')[0], line };
   setState('speaking');
-  // timestamp this co-star line against the recording, for the playback overlay
   const cue = S.recordStart ? { t:(performance.now()-S.recordStart)/1000, end:0, text:line, who:who.split(',')[0] } : null;
-  if (cue){ cue.end = cue.t + Math.min(6, Math.max(2, line.length*0.06)); S.cues.push(cue); }  // estimate; refined on 'ended'
-  const done = () => { if (cue) cue.end = (performance.now()-S.recordStart)/1000; };
-  if (!audioUri){
-    try {
-      const r = await fetch(BACKEND_URL + '/say', { method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ text: line, voice: S.scene.voice }) });
-      const d = await r.json();
-      if (r.ok && d.audio) audioUri = d.audio;
-    } catch(_){ /* fall through to a timed beat */ }
-  }
+  if (cue){ cue.end = cue.t + Math.min(6, Math.max(2, line.length*0.06)); S.cues.push(cue); }
+  const finish = () => { if (cue) cue.end = (performance.now()-S.recordStart)/1000; cont(); };
+  if (!audioUri) audioUri = await fetchSay(line);
   if (audioUri){
     $.player.src = audioUri;
-    $.player.onended = () => { done(); resumeListening(); };
-    $.player.play().catch(()=>beat(line));
-  } else beat(line);                                       // no audio available — read-beat then listen
+    $.player.onended = finish;
+    $.player.play().catch(()=>beat(line, finish));
+  } else beat(line, finish);
 }
-function beat(line){ setTimeout(resumeListening, Math.min(4500, 900 + line.length * 45)); }
+function beat(line, finish){ setTimeout(finish || resumeListening, Math.min(4500, 900 + line.length * 45)); }
 
-function sceneForApi(){ const s=S.scene; return {
-  ai_character:s.ai_character, human_character:s.human_character,
-  premise:s.premise, tone:s.tone, voice:s.voice, opening:s.opening, language:'en',
-  script: currentScript() }; }
+function sceneForApi(){
+  if (S.mode === 'scripted'){
+    const others = S.scriptChars.filter(c => uc(c)!==uc(S.userChar)).join(', ');
+    return { ai_character: others || 'the reader', human_character: S.userChar || 'you',
+             premise: 'A scripted scene read from the sides.', tone: SCRIPT_TONE,
+             voice: SCRIPT_VOICE, language: 'en' };
+  }
+  const s = S.scene;
+  return { ai_character:s.ai_character, human_character:s.human_character,
+    premise:s.premise, tone:s.tone, voice:s.voice, opening:s.opening, language:'en' };
+}
 
 // ---- rendering ----------------------------------------------------------
 function addTurn(kind, who, text, thinking){
@@ -392,21 +619,45 @@ function addNote(line, note){
 }
 function setStakes(v){ $.stakes.forEach((i,ix)=> i.classList.toggle('on', ix < v)); }
 
+function showLinePrompt(line){ $.linePrompt.hidden = false; $.linePrompt.innerHTML =
+  '<span class="lp-tag">YOUR LINE</span><span class="lp-text"></span>';
+  $.linePrompt.querySelector('.lp-text').textContent = line; }
+function hideLinePrompt(){ $.linePrompt.hidden = true; $.linePrompt.innerHTML=''; }
+
+// ---- review page --------------------------------------------------------
+function showReview(){
+  if (S.playbackUrl) URL.revokeObjectURL(S.playbackUrl);
+  S.playbackUrl = URL.createObjectURL(new Blob(S.chunks, { type:'video/webm' }));
+  $.cam.style.display = 'none'; $.camOff.style.display = 'none';
+  $.playback.src = S.playbackUrl; $.playback.hidden = false;
+  $.pill.className = 'pill review'; $.pill.hidden = true;             // review bar replaces the pill
+  $.reviewTake.textContent = 'Take ' + S.take;
+  $.reviewBar.hidden = false;
+  $.saveBtn.disabled = false;
+  $.playback.play().catch(()=>{});
+}
+function hideReview(){ $.reviewBar.hidden = true; $.pill.hidden = false; }
+$.replayBtn.onclick = ()=>{ try { $.playback.currentTime = 0; $.playback.play(); } catch(_){} };
+$.reNewTakeBtn.onclick = ()=>{ $.startBtn.click(); };                 // re-arm and roll a fresh take
+$.reSaveBtn.onclick = ()=> saveTake();
+
 // ---- save take ----------------------------------------------------------
-$.saveBtn.onclick = () => {
-  // Full self-tape (video+audio) + transcript. NEXT: POST to FC /sign -> PUT to OSS (oss2).
+function saveTake(){
   const stop = () => new Promise(res => {
     if (!S.recorder || S.recorder.state==='inactive') return res();
     S.recorder.onstop = res; S.recorder.stop(); });
   stop().then(()=>{
+    const sid = S.mode==='scripted' ? 'script' : S.scene.id;
     const blob = new Blob(S.chunks, { type:'video/webm' });
-    dl(URL.createObjectURL(blob), `audition-${S.scene.id}-take${S.take}.webm`);
+    dl(URL.createObjectURL(blob), `audition-${sid}-take${S.take}.webm`);
     dl('data:application/json,'+encodeURIComponent(JSON.stringify(
-        { scene:S.scene.title, take:S.take, dialogue:S.history, captions:S.cues }, null, 2)),
-       `audition-${S.scene.id}-take${S.take}.json`);
+        { scene: S.mode==='scripted' ? 'Scripted read' : S.scene.title, take:S.take,
+          dialogue:S.history, captions:S.cues }, null, 2)),
+       `audition-${sid}-take${S.take}.json`);
     if (S.stream && S.stream.active){ armRecorder(); try { S.recorder.start(); S.recordStart = performance.now(); S.cues = []; } catch(_){} }
   });
-};
+}
+$.saveBtn.onclick = saveTake;
 function dl(href, name){ const a=document.createElement('a'); a.href=href; a.download=name; a.click(); }
 
 // ---- session timer ------------------------------------------------------
@@ -440,7 +691,7 @@ function encodeWav(float, srcRate){
 }
 
 // ---- camera preview on load + manual "done" -----------------------------
-async function initCamera(){                 // show the webcam immediately — don't wait for Start
+async function initCamera(){
   try {
     S.stream = await navigator.mediaDevices.getUserMedia(MEDIA);
     $.cam.srcObject = S.stream; $.camOff.style.display = 'none';
@@ -450,9 +701,14 @@ async function initCamera(){                 // show the webcam immediately — 
 }
 // never get stuck if auto-detect misjudges: press Space or tap the video to end your line
 document.addEventListener('keydown', e => {
+  if (e.target && /^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)) return;    // don't hijack typing in the sides
   if (e.code === 'Space' && (S.state === 'hearing' || S.state === 'listening')){ e.preventDefault(); manualDone(); }
 });
-document.querySelector('.video-wrap').addEventListener('click', manualDone);
+document.querySelector('.video-wrap').addEventListener('click', e => {
+  if (e.target === $.lineBtn) return;                                            // the Line! button handles itself
+  manualDone();
+});
 
 fillScenes();
+setMode('improv');
 initCamera();
