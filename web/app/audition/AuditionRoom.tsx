@@ -52,9 +52,14 @@ export default function AuditionRoom() {
     engine.initCamera();
 
     const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return; // don't hijack keys while editing the script
       if (e.code === "Space") {
         e.preventDefault();
         engine.manualDone();
+      } else if (e.code === "KeyL") {
+        e.preventDefault();
+        engine.callLine(); // "Line!" — prompt my current line
       }
     };
     window.addEventListener("keydown", onKey);
@@ -141,6 +146,30 @@ export default function AuditionRoom() {
               placeholder="Paste the sides — the co-star follows its lines. Leave blank to improvise from the premise."
             />
           </label>
+          {(view.canCompile || view.compiling || view.compiled) && (
+            <div className={styles.compileWrap}>
+              <button
+                className={`${styles.btn} ${styles.compile}`}
+                disabled={view.compiling || (!view.canCompile && !view.compiled)}
+                onClick={() => engineRef.current?.compile()}
+              >
+                {view.compiling
+                  ? `🎬 Compiling… ${view.compileProgress}/${view.compileTotal}`
+                  : view.compiled
+                    ? "✓ Compiled — recompile co-star"
+                    : "🎬 Compile talking-head co-star"}
+              </button>
+              {view.compiling && (
+                <div className={styles.compileBar}>
+                  <i style={{ width: `${(view.compileProgress / Math.max(1, view.compileTotal)) * 100}%` }} />
+                </div>
+              )}
+              <p className={`${styles.hint} ${styles.mono}`} style={{ marginTop: 6 }}>
+                Pre-renders each co-star line as a lip-synced clip (~1–5 min per line). Optional —
+                skip it to rehearse with just the voice.
+              </p>
+            </div>
+          )}
           <div className={styles.controls}>
             <button
               className={`${styles.btn} ${styles.primary}`}
@@ -155,6 +184,14 @@ export default function AuditionRoom() {
               onClick={() => engineRef.current?.stop()}
             >
               ■ Stop
+            </button>
+            <button
+              className={`${styles.btn} ${styles.line}`}
+              disabled={!view.canStop || !view.scripted}
+              onClick={() => engineRef.current?.callLine()}
+              title="Prompt my current line (L)"
+            >
+              🎭 Line! <span className={styles.mono}>(L)</span>
             </button>
             <button
               className={`${styles.btn} ${styles.ghost}`}
@@ -195,8 +232,29 @@ export default function AuditionRoom() {
             </div>
             <div className={styles.subtitle}>{view.subtitle}</div>
             <div className={styles.whoSpoke}>{view.whoSpoke}</div>
+            {view.linePrompt && (
+              <div className={styles.linePrompt}>
+                <span className={styles.lpTag}>Line</span>
+                <div className={styles.lpText}>{view.linePrompt}</div>
+              </div>
+            )}
           </div>
           <audio ref={playerRef} hidden />
+          {view.scriptLines.length > 0 && (
+            <div className={styles.teleprompter} aria-label="script follow-along">
+              {view.scriptLines.map((l) => {
+                const cls = [styles.tLine, l.who === "actor" ? styles.tActor : styles.tCostar];
+                if (view.currentLine === l.i) cls.push(styles.tCurrent);
+                else if (view.currentLine > l.i) cls.push(styles.tDone);
+                return (
+                  <div key={l.i} className={cls.join(" ")}>
+                    <span className={styles.tWho}>{l.who === "actor" ? "You" : aiName}</span>
+                    <span className={styles.tText}>{l.text}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {/* RIGHT: transcript + notes */}
@@ -240,6 +298,41 @@ export default function AuditionRoom() {
           </div>
         </section>
       </main>
+
+      {view.takes.length > 0 && (
+        <section className={styles.takes}>
+          <div className={styles.panelLabel}>
+            TAKES <span className={styles.tag}>compare</span>
+          </div>
+          <div className={styles.takeRow}>
+            {view.takes.map((t) => (
+              <div key={t.id} className={styles.takeCard}>
+                <div className={styles.takeHead}>
+                  <b>Take {t.n}</b>
+                  <div className={styles.stakes}>
+                    {[0, 1, 2, 3, 4].map((ix) => (
+                      <i key={ix} className={ix < t.stakes ? styles.on : ""} />
+                    ))}
+                  </div>
+                </div>
+                <video className={styles.takeVid} src={t.url} controls playsInline />
+                <div className={styles.takeNotes}>
+                  {t.notes.length === 0 ? (
+                    <p className={styles.muted}>No notes on this take.</p>
+                  ) : (
+                    t.notes.map((n) => (
+                      <div key={n.id} className={styles.note}>
+                        <div className={styles.nLine}>&ldquo;{n.line}&rdquo;</div>
+                        <div>{n.note}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

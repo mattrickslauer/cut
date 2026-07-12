@@ -26,8 +26,20 @@ resources:
         QWEN_API_KEY: ${env('QWEN_API_KEY')}   # injected from shell at deploy; never committed
         ASR_MODEL: qwen3-asr-flash             # actor's line -> text (see ../../research/asr.md)
         COSTAR_MODEL: qwen-flash               # fastest good reply (~1.5s); qwen-max/qwen-plus also fine
-        TTS_MODEL: qwen3-tts-flash             # voices the reply (verified live on intl Model Studio)
+        TTS_MODEL: qwen3-tts-flash             # plain fallback voice (no emotion control)
+        TTS_INSTRUCT_MODEL: qwen3-tts-instruct-flash  # expressive: reads a delivery `instructions` string
+        # TTS_EXPRESSIVE: "1"                  # set "0" to force the flat flash voice
         TTS_VOICE: Cherry                      # default; each scene overrides per character
+        # ---- talking-head "compile" (optional; only needed for the video co-star) ----
+        PORTRAIT_MODEL: qwen-image             # co-star's face (/portrait)
+        AVATAR_MODEL: wan2.7-i2v-2026-04-25    # audio-driven lip-synced video (/avatar), intl endpoint
+        # AVATAR_RES: 720P
+        # OSS hosts each line's WAV so wan2.7-i2v can fetch it (driving_audio must be a public url).
+        # Create a bucket in your DashScope region and a RAM user with oss PutObject/GetObject.
+        OSS_ENDPOINT: oss-ap-southeast-1.aliyuncs.com   # match your DashScope/Model Studio region
+        OSS_BUCKET: ${env('OSS_BUCKET', '')}       # e.g. cut-audition-audio (leave unset to disable talking-head)
+        OSS_KEY_ID: ${env('OSS_KEY_ID', '')}       # RAM AccessKey id
+        OSS_KEY_SECRET: ${env('OSS_KEY_SECRET', '')}  # RAM AccessKey secret; never committed
       customRuntimeConfig:
         command:
           - python3

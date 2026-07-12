@@ -10,6 +10,7 @@
 
 import { AUDITION_URL } from "@/lib/config";
 import type { Scene } from "./scenes";
+import { LINE_MATCH_THRESHOLD, lineSimilarity, parseScript, type ScriptLine } from "./script";
 import { ASR_RATE, encodeWav, flatten } from "./wav";
 
 const BACKEND_URL = AUDITION_URL;
@@ -58,6 +59,20 @@ export type AuditionView = {
   canStop: boolean;
   canNewTake: boolean;
   canSave: boolean;
+  // scripted practice: the parsed sides (teleprompter), the current line pointer, and the
+  // on-demand "Line!" prompt. currentLine is -1 when not in a scripted take.
+  scriptLines: { i: number; who: "actor" | "costar"; speaker: string; text: string }[];
+  currentLine: number;
+  linePrompt: string | null;
+  scripted: boolean;
+  // talking-head compile status
+  canCompile: boolean;
+  compiling: boolean;
+  compiled: boolean;
+  compileProgress: number;
+  compileTotal: number;
+  // archived takes for side-by-side compare (newest first)
+  takes: { id: number; n: number; title: string; url: string; notes: Note[]; stakes: number; lineCount: number }[];
 };
 
 export function initialView(): AuditionView {
@@ -79,11 +94,31 @@ export function initialView(): AuditionView {
     canStop: false,
     canNewTake: false,
     canSave: false,
+    scriptLines: [],
+    currentLine: -1,
+    linePrompt: null,
+    scripted: false,
+    canCompile: false,
+    compiling: false,
+    compiled: false,
+    compileProgress: 0,
+    compileTotal: 0,
+    takes: [],
   };
 }
 
 type Cue = { t: number; end: number; text: string; who: string };
 type HistoryItem = { who: "actor" | "costar"; text: string };
+type TakeRecord = {
+  id: number;
+  n: number;
+  title: string;
+  url: string; // own blob URL, held until dispose() (not the shared playback URL)
+  dialogue: Turn[];
+  notes: Note[];
+  stakes: number;
+  cues: Cue[];
+};
 
 export class AuditionEngine {
   private cam: HTMLVideoElement;
@@ -126,6 +161,27 @@ export class AuditionEngine {
   private cctx: CanvasRenderingContext2D | null = null;
   private rafId = 0;
   private costarShot: { who: string; line: string } = { who: "", line: "" };
+  // Cutting the take invalidates any reader response still in flight. Every async beat
+  // captures `gen` and bails if it no longer matches; stop()/beginTake() bump it, abort
+  // the pending fetch, and clear the pending timer so nothing plays or re-arms after Cut.
+  private gen = 0;
+  private inflight: AbortController | null = null;
+  private beatTimer: ReturnType<typeof setTimeout> | null = null;
+  // scripted practice mode
+  private parsed: ScriptLine[] = []; // the sides, attributed + ordered
+  private ptr = 0; // index of the NEXT line to perform (co-star) or hear (actor)
+  private scripted = false; // set at take start when there are parsed lines
+  private tries = 0; // failed line-match attempts on the current actor line
+  // compiled talking-head co-star: a portrait + one lip-synced clip per co-star line, pre-rendered
+  // so the co-star performs as a real face (played into the canvas, mixed into the take), instantly.
+  private portrait: string | null = null;
+  private clips = new Map<number, string>(); // parsed-line index → video data URI
+  private compiled = false;
+  private compiling = false;
+  private clipActive = false; // drawFrame paints the talking-head clip instead of the text card
+  private costarVideo!: HTMLVideoElement; // reusable element the clips play through
+  private costarSrc: MediaElementAudioSourceNode | null = null; // its audio, routed into the mix
+  private takes: TakeRecord[] = []; // archived takes for compare, each with its own retained blob URL
 
   constructor(opts: {
     cam: HTMLVideoElement;
@@ -141,6 +197,10 @@ export class AuditionEngine {
     this.meterFill = opts.meterFill;
     this.scene = opts.scene;
     this.onChange = opts.onChange;
+    this.costarVideo = document.createElement("video"); // off-DOM; drawn to canvas, audio via graph
+    this.costarVideo.playsInline = true;
+    this.costarVideo.preload = "auto";
+    this.costarVideo.crossOrigin = "anonymous";
   }
 
   // ---- view plumbing ----
@@ -155,12 +215,42 @@ export class AuditionEngine {
   // ---- scene / script setters (React-controlled inputs) ----
   setScene(s: Scene) {
     this.scene = s;
+    this.reparse();
   }
   setScript(text: string) {
     this.script = text;
+    this.reparse();
   }
   private currentScript() {
     return (this.script || "").trim();
+  }
+  // Re-parse the sides into attributed lines and refresh the teleprompter. Cheap; runs on every
+  // edit and on scene change (the co-star's name decides attribution). No-op mid-take.
+  private reparse() {
+    this.parsed = this.currentScript()
+      ? parseScript(this.script, this.scene.ai_character, this.scene.human_character)
+      : [];
+    if (this.state === "idle") {
+      // editing the sides (or switching scene) invalidates any compiled talking-head clips
+      this.compiled = false;
+      this.clips.clear();
+      this.portrait = null;
+      this.patch({
+        scriptLines: this.parsed.map((l) => ({ i: l.i, who: l.who, speaker: l.speaker, text: l.text })),
+        currentLine: -1,
+        scripted: false,
+        linePrompt: null,
+        compiled: false,
+        canCompile: this.parsed.some((l) => l.who === "costar") && !this.compiling,
+        compileProgress: 0,
+        compileTotal: 0,
+      });
+    }
+  }
+  // The actor's next expected scripted line, or "" when it's not the actor's turn / no script.
+  private expectedActorLine(): string {
+    const l = this.parsed[this.ptr];
+    return l && l.who === "actor" ? l.text : "";
   }
 
   // ---- persistent audio graph (created once; player source binds once, ever) ----
@@ -173,6 +263,9 @@ export class AuditionEngine {
     this.playerSrc = this.audioCtx.createMediaElementSource(this.player);
     this.playerSrc.connect(this.mixDest); // reader voice → recording
     this.playerSrc.connect(this.audioCtx.destination); // reader voice → speakers
+    this.costarSrc = this.audioCtx.createMediaElementSource(this.costarVideo);
+    this.costarSrc.connect(this.mixDest); // talking-head clip voice → recording
+    this.costarSrc.connect(this.audioCtx.destination); // → speakers
   }
 
   // ---- director's-cut compositor ----
@@ -217,7 +310,16 @@ export class AuditionEngine {
     const W = 1280,
       H = 720,
       bar = 54;
-    if (this.state === "speaking") {
+    if (this.state === "speaking" && this.clipActive && this.costarVideo.videoWidth) {
+      // compiled talking-head: the co-star is a real (lip-synced) face in the two-shot
+      c.fillStyle = "#000";
+      c.fillRect(0, 0, W, H);
+      this.coverDraw(c, this.costarVideo, W, H);
+      c.textAlign = "center";
+      c.fillStyle = "#ffb056";
+      c.font = "600 24px system-ui,sans-serif";
+      c.fillText((this.costarShot.who || "").toUpperCase(), W / 2, H - bar - 16);
+    } else if (this.state === "speaking") {
       const g = c.createLinearGradient(0, 0, W, H);
       g.addColorStop(0, "#1c1420");
       g.addColorStop(1, "#08080f");
@@ -332,8 +434,30 @@ export class AuditionEngine {
     }
   }
 
+  // invalidate any reader response still in flight (thinking/speaking beat): bump the
+  // generation so late resolutions bail, abort the pending fetch, drop the pending timer,
+  // and unhook onended so finished playback can't re-arm the mic.
+  private cutPending() {
+    this.gen++;
+    try {
+      this.inflight?.abort();
+    } catch {}
+    this.inflight = null;
+    if (this.beatTimer) {
+      clearTimeout(this.beatTimer);
+      this.beatTimer = null;
+    }
+    this.player.onended = null;
+    try {
+      this.costarVideo.onended = null;
+      this.costarVideo.pause();
+    } catch {}
+    this.clipActive = false;
+  }
+
   // stop the audition, then play back the take you just recorded
   stop() {
+    this.cutPending(); // drop any reader response still in flight — nothing speaks after Cut
     try {
       this.player.pause();
     } catch {}
@@ -350,8 +474,9 @@ export class AuditionEngine {
       } catch {}
       this.stream = this.node = this.source = null;
       this.state = "idle";
+      this.scripted = false;
       this.meterFill.style.width = "0";
-      this.patch({ subtitle: "", whoSpoke: "", recOn: false });
+      this.patch({ subtitle: "", whoSpoke: "", recOn: false, currentLine: -1, linePrompt: null, scripted: false });
       if (this.chunks && this.chunks.length) {
         if (this.playbackUrl) URL.revokeObjectURL(this.playbackUrl);
         this.playbackUrl = URL.createObjectURL(new Blob(this.chunks, { type: "video/webm" }));
@@ -366,6 +491,7 @@ export class AuditionEngine {
           canSave: true,
         });
         this.playback.play().catch(() => {});
+        this.archiveTake(); // keep it for side-by-side compare
       } else {
         this.cam.srcObject = null;
         this.patch({ camOff: true });
@@ -385,6 +511,7 @@ export class AuditionEngine {
   }
 
   private beginTake(first: boolean) {
+    this.cutPending(); // a fresh take invalidates any reader beat left over from the last one
     try {
       this.player.pause();
     } catch {}
@@ -410,8 +537,16 @@ export class AuditionEngine {
     this.sessionStart = performance.now();
     this.startTimer();
     this.resetCapture();
-    if (this.currentScript()) {
-      this.resumeListening(); // scripted: you start
+    this.reparse();
+    this.scripted = this.parsed.length > 0;
+    this.ptr = 0;
+    this.tries = 0;
+    if (this.scripted) {
+      this.patch({ scripted: true, linePrompt: null });
+      this.setPtr(0);
+      this.stepScript(); // co-star opens, or hand the first beat to the actor
+    } else if (this.currentScript()) {
+      this.resumeListening(); // script present but unparseable — you start, improv reader follows
     } else {
       this.addTurn("costar", this.scene.ai_character, this.scene.opening);
       this.history.push({ who: "costar", text: this.scene.opening });
@@ -437,14 +572,195 @@ export class AuditionEngine {
     this.resetCapture();
     this.setState("listening");
   }
-  private finishLine() {
+  private finishLine(forced = false) {
     if (this.state !== "hearing") return;
     const wav = encodeWav(flatten(this.buffer, this.bufLen), this.srcRate);
     this.resetCapture();
-    this.runTurn({ audio: wav });
+    if (this.scripted && this.ptr < this.parsed.length) this.runScriptedTurn(wav, forced);
+    else this.runTurn({ audio: wav }); // improv, or off-script continuation once the sides run out
   }
   manualDone() {
-    if (this.state === "hearing") this.finishLine();
+    if (this.state === "hearing") this.finishLine(true); // explicit "done" overrides the line gate
+  }
+
+  // ---- scripted practice: current-line pointer drives teleprompter, gating, and "Line!" ----
+  private setPtr(n: number) {
+    this.ptr = n;
+    this.patch({ currentLine: Math.min(n, this.parsed.length) });
+  }
+
+  // Perform the beat at the pointer: the co-star speaks its lines; on an actor line we hand off
+  // to the mic and let line-gated advance decide when to move on.
+  private stepScript() {
+    if (this.ptr >= this.parsed.length) return this.scriptComplete();
+    const line = this.parsed[this.ptr];
+    this.patch({ currentLine: this.ptr, linePrompt: null });
+    if (line.who === "costar") {
+      this.addTurn("costar", this.scene.ai_character, line.text);
+      this.history.push({ who: "costar", text: line.text });
+      const advance = () => {
+        this.setPtr(this.ptr + 1);
+        this.stepScript();
+      };
+      const clip = this.clips.get(line.i);
+      if (this.compiled && clip) this.playClip(this.scene.ai_character, line.text, clip, advance);
+      else this.say(this.scene.ai_character, line.text, undefined, advance); // fall back to voice-only
+    } else {
+      this.tries = 0;
+      this.resumeListening(); // your line — deliver it; we advance once you have
+    }
+  }
+
+  // One scripted actor beat: transcribe what you said and only advance when it matches your
+  // expected line "within reason". A manual "done" or repeated near-misses advance anyway so the
+  // scene never hard-sticks. Reuses /costar for ASR + the reader's coaching note.
+  private async runScriptedTurn(wav: string, forced: boolean) {
+    const gen = this.gen;
+    const expected = this.expectedActorLine();
+    this.setState("thinking");
+    const ac = new AbortController();
+    this.inflight = ac;
+    try {
+      const r = await fetch(BACKEND_URL + "/costar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scene: this.sceneForApi(), history: this.history, audio: wav }),
+        signal: ac.signal,
+      });
+      const data = await r.json();
+      if (gen !== this.gen) return;
+      if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
+      const heard = (data.heard && data.heard.text) || "";
+      const sim = lineSimilarity(heard, expected);
+      const ok = !expected || forced || sim >= LINE_MATCH_THRESHOLD || ++this.tries >= 3;
+      if (!ok) {
+        this.resumeListening(); // near-miss: hold the pointer, listen for the rest of your line
+        this.patch({ pillOverride: "Keep going — finish your line" }); // after setState, which clears it
+        return;
+      }
+      this.tries = 0;
+      this.addTurn("actor", "You", heard || expected);
+      this.history.push({ who: "actor", text: heard || expected });
+      if (data.note) this.addNote(heard || expected, data.note);
+      if (data.stakes) this.setStakes(data.stakes);
+      this.setPtr(this.ptr + 1);
+      this.stepScript(); // deliver the co-star's answering line
+    } catch (e) {
+      if (gen !== this.gen) return;
+      this.patch({ pillKind: "idle", pillOverride: "Reader error: " + (e as Error).message });
+      this.beatTimer = setTimeout(() => {
+        if (gen === this.gen) this.resumeListening();
+      }, 1400);
+    }
+  }
+
+  private scriptComplete() {
+    this.setPtr(this.parsed.length);
+    this.patch({ linePrompt: null, pillKind: "idle", pillOverride: "Scene complete — press Stop for your cut" });
+    this.state = "listening"; // linger / improv on; Stop makes the cut. finishLine falls to runTurn.
+  }
+
+  // "Line!" — surface the actor's current expected line (and softly read it) when they blank. The
+  // prompt is spoken through a throwaway element, NOT the recorded mix, so it stays out of the take.
+  callLine() {
+    const line = this.expectedActorLine();
+    if (!line) return;
+    this.patch({ linePrompt: line });
+    fetch(BACKEND_URL + "/say", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: line, voice: this.scene.voice, tone: "a soft, quick prompter whisper" }),
+    })
+      .then((r) => r.json())
+      .then((d) => d && d.audio && new Audio(d.audio).play().catch(() => {}))
+      .catch(() => {});
+  }
+
+  // ---- compile: pre-render the co-star as a talking-head (portrait + a lip-synced clip per line) ----
+  async compile() {
+    if (this.compiling) return;
+    this.reparse();
+    const lines = this.parsed.filter((l) => l.who === "costar");
+    if (!lines.length) return this.patch({ pillOverride: "No co-star lines in the script to compile" });
+    this.compiling = true;
+    this.compiled = false;
+    this.clips.clear();
+    this.patch({
+      canCompile: false,
+      compiling: true,
+      compiled: false,
+      compileProgress: 0,
+      compileTotal: lines.length,
+      pillOverride: "Compiling scene partner — generating the co-star's face…",
+    });
+    try {
+      const portrait = await this.postJson("/portrait", {
+        character: this.scene.ai_character,
+        tone: this.scene.tone,
+      });
+      if (!portrait.image) throw new Error(portrait.error || "portrait failed");
+      this.portrait = portrait.image;
+      let done = 0;
+      for (const l of lines) {
+        this.patch({ pillOverride: `Filming the co-star… line ${done + 1} of ${lines.length}` });
+        const said = await this.postJson("/say", { text: l.text, voice: this.scene.voice, tone: this.scene.tone });
+        if (!said.audio) throw new Error(said.error || "voice failed");
+        const sub = await this.postJson("/avatar", { image: this.portrait, audio: said.audio });
+        if (!sub.task_id) throw new Error(sub.error || "avatar submit failed");
+        this.clips.set(l.i, await this.pollAvatar(sub.task_id));
+        this.patch({ compileProgress: ++done });
+      }
+      this.compiled = true;
+      this.patch({ compiling: false, compiled: true, pillOverride: `Scene partner ready — ${done} shots. Press Start.` });
+    } catch (e) {
+      this.patch({ compiling: false, pillOverride: "Compile failed: " + (e as Error).message });
+    } finally {
+      this.compiling = false;
+      this.patch({ canCompile: this.parsed.some((l) => l.who === "costar") && !this.compiled });
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private postJson(path: string, body: unknown): Promise<any> {
+    return fetch(BACKEND_URL + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => r.json());
+  }
+
+  // Poll a talking-head task until the mp4 lands (video is minutes-scale). Best-effort, ~15 min cap.
+  private async pollAvatar(taskId: string): Promise<string> {
+    for (let i = 0; i < 60; i++) {
+      await new Promise((res) => setTimeout(res, 15000));
+      const s = await fetch(`${BACKEND_URL}/avatar?task_id=${encodeURIComponent(taskId)}`).then((r) => r.json());
+      if (s.status === "SUCCEEDED" && s.video) return s.video as string;
+      if (s.error) throw new Error(s.error);
+    }
+    throw new Error("avatar timed out");
+  }
+
+  // Play a pre-rendered talking-head clip as the co-star's turn: painted into the canvas by
+  // drawFrame, its audio already routed into the recording. Hands the turn back when it ends.
+  private playClip(who: string, line: string, src: string, after: () => void) {
+    const gen = this.gen;
+    const whoShort = who.split(",")[0];
+    this.patch({ subtitle: line, whoSpoke: whoShort });
+    this.costarShot = { who: whoShort, line };
+    this.setState("speaking");
+    const cue: Cue | null = this.recordStart
+      ? { t: (performance.now() - this.recordStart) / 1000, end: 0, text: line, who: whoShort }
+      : null;
+    if (cue) this.cues.push(cue);
+    this.clipActive = true;
+    const finish = () => {
+      this.clipActive = false;
+      if (cue) cue.end = (performance.now() - this.recordStart) / 1000;
+      if (gen === this.gen) after();
+    };
+    this.costarVideo.src = src;
+    this.costarVideo.onended = finish;
+    this.costarVideo.play().catch(finish);
   }
 
   private onAudio = (e: AudioProcessingEvent) => {
@@ -490,15 +806,20 @@ export class AuditionEngine {
 
   // ---- one beat: POST /costar → render → reader speaks → resume ----
   private async runTurn(extra: { audio?: string; text?: string }) {
+    const gen = this.gen;
     this.setState("thinking");
     const thinkingId = this.addTurn("costar", this.scene.ai_character, "…", true);
+    const ac = new AbortController();
+    this.inflight = ac;
     try {
       const r = await fetch(BACKEND_URL + "/costar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(Object.assign({ scene: this.sceneForApi(), history: this.history }, extra)),
+        signal: ac.signal,
       });
       const data = await r.json();
+      if (gen !== this.gen) return this.removeTurn(thinkingId); // cut while thinking — drop it
       if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
       this.removeTurn(thinkingId);
       const heard = (data.heard && data.heard.text) || extra.text || "(unclear)";
@@ -510,14 +831,19 @@ export class AuditionEngine {
       if (data.stakes) this.setStakes(data.stakes);
       this.say(this.scene.ai_character, data.line, data.audio);
     } catch (e) {
+      if (gen !== this.gen) return this.removeTurn(thinkingId); // aborted by Cut — stay quiet
       this.removeTurn(thinkingId);
       this.patch({ pillKind: "idle", pillOverride: "Reader error: " + (e as Error).message });
-      setTimeout(() => this.resumeListening(), 1400);
+      this.beatTimer = setTimeout(() => {
+        if (gen === this.gen) this.resumeListening();
+      }, 1400);
     }
   }
 
   // speak a co-star line, then hand the turn back
-  private async say(who: string, line: string, audioUri?: string) {
+  private async say(who: string, line: string, audioUri?: string, after?: () => void) {
+    const gen = this.gen;
+    const hand = after || (() => this.resumeListening()); // default: give the turn back to the actor
     const whoShort = who.split(",")[0];
     this.patch({ subtitle: line, whoSpoke: whoShort });
     this.costarShot = { who: whoShort, line };
@@ -533,11 +859,14 @@ export class AuditionEngine {
       if (cue) cue.end = (performance.now() - this.recordStart) / 1000;
     };
     if (!audioUri) {
+      const ac = new AbortController();
+      this.inflight = ac;
       try {
         const r = await fetch(BACKEND_URL + "/say", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: line, voice: this.scene.voice }),
+          body: JSON.stringify({ text: line, voice: this.scene.voice, tone: this.scene.tone }),
+          signal: ac.signal,
         });
         const d = await r.json();
         if (r.ok && d.audio) audioUri = d.audio;
@@ -545,17 +874,20 @@ export class AuditionEngine {
         /* fall through to a timed beat */
       }
     }
+    if (gen !== this.gen) return; // cut while generating/speaking — don't play, don't re-arm
     if (audioUri) {
       this.player.src = audioUri;
       this.player.onended = () => {
         done();
-        this.resumeListening();
+        if (gen === this.gen) hand();
       };
-      this.player.play().catch(() => this.beat(line));
-    } else this.beat(line);
+      this.player.play().catch(() => this.beat(line, gen, hand));
+    } else this.beat(line, gen, hand);
   }
-  private beat(line: string) {
-    setTimeout(() => this.resumeListening(), Math.min(4500, 900 + line.length * 45));
+  private beat(line: string, gen: number, hand: () => void) {
+    this.beatTimer = setTimeout(() => {
+      if (gen === this.gen) hand();
+    }, Math.min(4500, 900 + line.length * 45));
   }
 
   private sceneForApi() {
@@ -589,6 +921,35 @@ export class AuditionEngine {
   }
   private setStakes(v: number) {
     this.patch({ stakes: v });
+  }
+
+  // ---- takes archive (compare) ----
+  // Keep this take for side-by-side compare: its own blob URL (the shared playback URL gets revoked
+  // on the next Stop) plus the dialogue, reader notes, stakes, and caption cues it earned.
+  private archiveTake() {
+    const url = URL.createObjectURL(new Blob(this.chunks, { type: "video/webm" }));
+    const rec: TakeRecord = {
+      id: this.uid++,
+      n: this.takes.length + 1,
+      title: this.scene.title,
+      url,
+      dialogue: [...this.view.dialogue],
+      notes: [...this.view.notes],
+      stakes: this.view.stakes,
+      cues: [...this.cues],
+    };
+    this.takes = [rec, ...this.takes]; // newest first
+    this.patch({
+      takes: this.takes.map((t) => ({
+        id: t.id,
+        n: t.n,
+        title: t.title,
+        url: t.url,
+        notes: t.notes,
+        stakes: t.stakes,
+        lineCount: t.dialogue.length,
+      })),
+    });
   }
 
   // ---- save take ----
@@ -644,6 +1005,7 @@ export class AuditionEngine {
 
   // ---- teardown ----
   dispose() {
+    this.cutPending();
     try {
       if (this.timer) clearInterval(this.timer);
       cancelAnimationFrame(this.rafId);
@@ -655,5 +1017,10 @@ export class AuditionEngine {
       this.audioCtx?.close();
     } catch {}
     if (this.playbackUrl) URL.revokeObjectURL(this.playbackUrl);
+    this.takes.forEach((t) => {
+      try {
+        URL.revokeObjectURL(t.url);
+      } catch {}
+    });
   }
 }
