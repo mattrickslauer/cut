@@ -251,7 +251,13 @@ def costar_reply(scene, history, actor_line, actor_emotion=None, forced_line=Non
     try:
         out = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        out = {"line": content.strip()[:200], "emotion": "neutral", "note": "", "stakes": 3}
+        out = None
+    # response_format is json_object, but the model can still hand back a bare JSON string/array (or
+    # null) instead of the object we asked for — coerce anything non-dict to the plain-line shape so
+    # the out[...] assignments below don't blow up ("'str' object does not support item assignment").
+    if not isinstance(out, dict):
+        line = out if isinstance(out, str) else content.strip()[:200]
+        out = {"line": line, "emotion": "neutral", "note": "", "stakes": 3}
     if forced_line:                       # never let a paraphrase through in scripted mode
         out["line"] = forced_line
     out["_usage"] = body.get("usage", {})
