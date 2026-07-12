@@ -59,7 +59,17 @@ const S = {
   stream:null, audioCtx:null, node:null, source:null, srcRate:48000,
   ring:[], buffer:[], bufLen:0, onset:0, silenceMs:0, speechMs:0, lineMs:0,
   recorder:null, chunks:[], sessionStart:0, timer:0,
+  cues:[], recordStart:0, playbackUrl:null,               // co-star caption cues for playback overlay
 };
+
+// arm a fresh recorder (its own chunks array, so a stopped take can't leak into the next)
+function armRecorder(){
+  const rec = new MediaRecorder(S.stream, pickMime());
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  S.recorder = rec; S.chunks = chunks;
+  return rec;
+}
 
 // ---- scene picker -------------------------------------------------------
 function fillScenes(){
@@ -106,8 +116,6 @@ $.startBtn.onclick = async () => {
     S.node = S.audioCtx.createScriptProcessor(4096, 1, 1);
     S.node.onaudioprocess = onAudio;
     S.source.connect(S.node); S.node.connect(S.audioCtx.destination);   // node emits silence (no echo)
-    S.recorder = new MediaRecorder(S.stream, pickMime());               // full take (video+audio)
-    S.recorder.ondataavailable = e => e.data.size && S.chunks.push(e.data);
     $.startBtn.disabled = true; $.stopBtn.disabled = false;
     $.newTakeBtn.disabled = false; $.saveBtn.disabled = false;
     beginTake(true);
@@ -132,6 +140,14 @@ $.stopBtn.onclick = () => {
       $.cam.style.display = 'none'; $.camOff.style.display = 'none';
       $.playback.src = S.playbackUrl; $.playback.hidden = false;
       $.pill.className = 'pill idle'; $.pill.innerHTML = '▶ Take ' + S.take + ' — playback';
+      const cues = S.cues.slice();                          // overlay the reader's lines, synced to the video
+      $.playback.ontimeupdate = () => {
+        const t = $.playback.currentTime; let cur = null;
+        for (const c of cues){ if (t >= c.t && t < c.end) cur = c; }
+        $.subtitle.textContent = cur ? cur.text : '';
+        $.whoSpoke.textContent = cur ? cur.who : '';
+      };
+      $.playback.onended = () => { $.subtitle.textContent=''; $.whoSpoke.textContent=''; };
       $.playback.play().catch(()=>{});
       $.saveBtn.disabled = false;                           // let them keep the take
     } else {
@@ -150,10 +166,14 @@ function beginTake(first){
   $.takeTag.textContent = 'take ' + S.take;
   $.dialogue.innerHTML = ''; setStakes(0);
   $.notesList.innerHTML = '<p class="muted">Notes on your delivery appear here after each line.</p>';
+  // start a clean recording for this take (t=0), then the reader opens the scene
+  try { S.recorder && S.recorder.state !== 'inactive' && S.recorder.stop(); } catch(_){}
+  armRecorder(); S.cues = [];
+  try { S.recorder.start(); } catch(_){}
+  S.recordStart = performance.now();
   addTurn('costar', S.scene.ai_character, S.scene.opening);              // reader opens; you respond
   S.history.push({ who:'costar', text:S.scene.opening });
   say(S.scene.ai_character, S.scene.opening);
-  S.chunks = []; try { S.recorder && S.recorder.state==='inactive' && S.recorder.start(); } catch(_){}
   S.sessionStart = performance.now(); startTimer();
   resetCapture();
 }
@@ -263,6 +283,10 @@ async function say(who, line, audioUri){
   $.subtitle.textContent = line;
   $.whoSpoke.textContent = who.split(',')[0];
   setState('speaking');
+  // timestamp this co-star line against the recording, for the playback overlay
+  const cue = S.recordStart ? { t:(performance.now()-S.recordStart)/1000, end:0, text:line, who:who.split(',')[0] } : null;
+  if (cue){ cue.end = cue.t + Math.min(6, Math.max(2, line.length*0.06)); S.cues.push(cue); }  // estimate; refined on 'ended'
+  const done = () => { if (cue) cue.end = (performance.now()-S.recordStart)/1000; };
   if (!audioUri){
     try {
       const r = await fetch(BACKEND_URL + '/say', { method:'POST',
@@ -274,7 +298,7 @@ async function say(who, line, audioUri){
   }
   if (audioUri){
     $.player.src = audioUri;
-    $.player.onended = resumeListening;
+    $.player.onended = () => { done(); resumeListening(); };
     $.player.play().catch(()=>beat(line));
   } else beat(line);                                       // no audio available — read-beat then listen
 }
@@ -312,9 +336,9 @@ $.saveBtn.onclick = () => {
     const blob = new Blob(S.chunks, { type:'video/webm' });
     dl(URL.createObjectURL(blob), `audition-${S.scene.id}-take${S.take}.webm`);
     dl('data:application/json,'+encodeURIComponent(JSON.stringify(
-        { scene:S.scene.title, take:S.take, dialogue:S.history }, null, 2)),
+        { scene:S.scene.title, take:S.take, dialogue:S.history, captions:S.cues }, null, 2)),
        `audition-${S.scene.id}-take${S.take}.json`);
-    try { S.recorder.start(); } catch(_){}
+    if (S.stream && S.stream.active){ armRecorder(); try { S.recorder.start(); S.recordStart = performance.now(); S.cues = []; } catch(_){} }
   });
 };
 function dl(href, name){ const a=document.createElement('a'); a.href=href; a.download=name; a.click(); }
