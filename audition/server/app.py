@@ -20,6 +20,10 @@ server-side. Deploys independently of the director's cut-perceive function.
   POST /portrait-> { character, tone? } -> { image, image_url } : a head-and-shoulders
                    portrait of the co-star (qwen-image), framed for talking-head animation.
                    First half of the scripted "compile" pass (avatar video is the second).
+  POST /avatar  -> { image, audio_url, prompt?, duration? } -> { task_id } : submit an
+                   audio-driven talking-head video (wan2.7-i2v) — portrait as first frame,
+                   the line's audio (a PUBLIC url) as the lip-sync driver. Minutes-scale.
+  GET  /avatar?task_id=... -> { status, video?, error? } : poll it; video is an inlined mp4.
 
 WHY TURN-BASED HTTP (not a streaming WebSocket): a scale-to-zero FC function can't hold a
 persistent socket without breaking scale-to-zero. A scene partner delivers *lines* with
@@ -31,7 +35,7 @@ Runs identically locally (`QWEN_API_KEY=... PORT=8787 python3 app.py`) and on FC
 (listens on $FC_SERVER_PORT, default 9000).
 """
 import os, json, base64, time, urllib.request, urllib.error
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DASHSCOPE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -40,6 +44,18 @@ DASHSCOPE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/com
 IMG_SUBMIT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
 TASK_POLL = "https://dashscope-intl.aliyuncs.com/api/v1/tasks/"
 PORTRAIT_MODEL = os.environ.get("PORTRAIT_MODEL", "qwen-image")
+# Audio-driven talking-head video for the "compile" pass. On the intl/Singapore key the dedicated
+# talking-head models (EMO, wan2.2-s2v) are Beijing-only; wan2.7-i2v is the intl route — it takes a
+# first-frame portrait (base64 OK) + a driving_audio track (must be a PUBLIC URL, not base64) and
+# lip-syncs the face to it. Minutes-scale + async, so /avatar submits and the browser polls.
+VIDEO_SUBMIT = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis"
+AVATAR_MODEL = os.environ.get("AVATAR_MODEL", "wan2.7-i2v-2026-04-25")
+AVATAR_RES = os.environ.get("AVATAR_RES", "720P")
+AVATAR_PROMPT = os.environ.get(
+    "AVATAR_PROMPT",
+    "A person speaking directly to camera, natural expression, subtle head movement, lips synced "
+    "to the speech, static plain background, single person",
+)
 # qwen-tts lives on the native multimodal-generation endpoint (synchronous, returns an audio URL).
 # Flash and instruct-flash share this endpoint and response shape; instruct-flash additionally
 # reads input.instructions for expressive delivery. (Verified against Model Studio qwen-tts docs.)
@@ -216,21 +232,30 @@ def synthesize(text, voice=None, emotion=None, instruction=None, tone=None):
     return _tts_call(TTS_MODEL, text, voice)
 
 
-def _submit_and_poll(url, body, tries=40, interval=1.5, timeout=30):
-    """Submit an async DashScope task (X-DashScope-Async) and poll /tasks/{id} until it
-    SUCCEEDS, returning the whole output object. Shared by portrait + (later) avatar video."""
+def _submit_task(url, body):
+    """Submit an async DashScope task (X-DashScope-Async) and return its task_id."""
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json",
                  "X-DashScope-Async": "enable"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        task_id = json.loads(r.read().decode())["output"]["task_id"]
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())["output"]["task_id"]
+
+
+def _task_output(task_id):
+    """One poll of /tasks/{id}; returns the output object (task_status + results/urls)."""
+    req = urllib.request.Request(TASK_POLL + task_id, headers={"Authorization": f"Bearer {API_KEY}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())["output"]
+
+
+def _submit_and_poll(url, body, tries=40, interval=1.5):
+    """Submit + block-poll until SUCCEEDED — for fast tasks (images, ~10-30s). Long tasks (video)
+    submit via _submit_task and let the caller poll so the HTTP request isn't held for minutes."""
+    task_id = _submit_task(url, body)
     for _ in range(tries):
         time.sleep(interval)
-        preq = urllib.request.Request(TASK_POLL + task_id,
-                                      headers={"Authorization": f"Bearer {API_KEY}"})
-        with urllib.request.urlopen(preq, timeout=timeout) as r:
-            out = json.loads(r.read().decode())["output"]
+        out = _task_output(task_id)
         st = out.get("task_status")
         if st == "SUCCEEDED":
             return out
@@ -265,6 +290,40 @@ def generate_portrait(character, tone=None):
                                         "parameters": {"size": "1024*1024", "n": 1}})
     url = out["results"][0]["url"]
     return {"image": _rehost(url), "image_url": url}
+
+
+def submit_avatar(image, audio_url, prompt=None, duration=None):
+    """Kick off an audio-driven talking-head video (wan2.7-i2v): the portrait as the first frame,
+    the co-star line's audio as the lip-sync driver. Returns a task_id — the browser polls it.
+    `image` may be a base64 data URI; `audio_url` MUST be a public URL DashScope can fetch."""
+    body = {
+        "model": AVATAR_MODEL,
+        "input": {
+            "prompt": prompt or AVATAR_PROMPT,
+            "media": [
+                {"type": "first_frame", "url": image},
+                {"type": "driving_audio", "url": audio_url},
+            ],
+        },
+        "parameters": {"resolution": AVATAR_RES, "prompt_extend": True,
+                       **({"duration": int(duration)} if duration else {})},
+    }
+    return _submit_task(VIDEO_SUBMIT, body)
+
+
+def avatar_status(task_id):
+    """Poll a talking-head task once. When done, inline the resulting mp4 as a data URI so the
+    browser can composite it into the take without CORS taint."""
+    out = _task_output(task_id)
+    st = out.get("task_status")
+    res = {"status": st}
+    if st == "SUCCEEDED":
+        url = out.get("video_url") or ((out.get("results") or [{}])[0] or {}).get("url")
+        res["video"] = _rehost(url) if url else None
+        res["video_url"] = url
+    elif st in ("FAILED", "CANCELED", "UNKNOWN"):
+        res["error"] = out.get("message") or json.dumps(out)[:200]
+    return res
 
 
 def costar(scene, history, audio_data_url=None, text=None):
@@ -302,9 +361,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204); self._cors(); self.end_headers()
 
     def do_GET(self):
-        path = urlparse(self.path).path.rstrip("/")
+        u = urlparse(self.path)
+        path = u.path.rstrip("/")
         if path == "/warm":                        # cheap pre-roll: spins a cold instance up
             return self._json(200, {"warm": True})
+        if path == "/avatar":                      # poll a talking-head task: /avatar?task_id=...
+            tid = (parse_qs(u.query).get("task_id") or [""])[0]
+            if not tid:
+                return self._json(400, {"error": "missing 'task_id'"})
+            if not API_KEY:
+                return self._json(500, {"error": "QWEN_API_KEY not configured"})
+            try:
+                return self._json(200, avatar_status(tid))
+            except urllib.error.HTTPError as e:
+                return self._json(502, {"error": "dashscope", "detail": e.read().decode()[:300]})
+            except Exception as e:
+                return self._json(500, {"error": str(e)})
         if path in ("/health", ""):
             return self._json(200, {"ok": True, "asr_model": ASR_MODEL,
                                     "costar_model": COSTAR_MODEL, "tts_model": TTS_MODEL,
@@ -314,7 +386,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        if path not in ("/costar", "/say", "/portrait"):
+        if path not in ("/costar", "/say", "/portrait", "/avatar"):
             return self._json(404, {"error": "not found"})
         if not API_KEY:
             return self._json(500, {"error": "QWEN_API_KEY not configured"})
@@ -335,6 +407,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not req.get("character"):
                     return self._json(400, {"error": "missing 'character'"})
                 return self._json(200, generate_portrait(req["character"], req.get("tone")))
+            if path == "/avatar":                          # submit a talking-head video → { task_id }
+                if not req.get("image") or not req.get("audio_url"):
+                    return self._json(400, {"error": "need 'image' (base64/url) and public 'audio_url'"})
+                tid = submit_avatar(req["image"], req["audio_url"], req.get("prompt"), req.get("duration"))
+                return self._json(202, {"task_id": tid})
             if not req.get("audio") and not req.get("text"):
                 return self._json(400, {"error": "missing 'audio' or 'text'"})
             if not req.get("scene"):
