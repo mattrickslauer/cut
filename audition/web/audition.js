@@ -180,20 +180,28 @@ async function sendLine(wavDataUri){
   }
 }
 
-// speak a co-star line (audio if we have it), then hand the turn back
-function say(who, line, audioUri){
+// speak a co-star line, then hand the turn back. If we weren't handed audio
+// (e.g. the opening line), synthesize it via /say so the whole scene is voiced.
+async function say(who, line, audioUri){
   $.subtitle.textContent = line;
   $.whoSpoke.textContent = who.split(',')[0];
-  if (audioUri){
-    setState('speaking'); $.player.src = audioUri;
-    $.player.onended = () => setState('listening');
-    $.player.play().catch(()=>{ setState('listening'); });
-  } else {
-    setState('speaking');                                  // opening or no TTS — beat to read, then listen
-    const beat = Math.min(4500, 900 + line.length * 45);
-    setTimeout(()=>setState('listening'), beat);
+  setState('speaking');
+  if (!audioUri){
+    try {
+      const r = await fetch(BACKEND_URL + '/say', { method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ text: line, voice: S.scene.voice }) });
+      const d = await r.json();
+      if (r.ok && d.audio) audioUri = d.audio;
+    } catch(_){ /* fall through to a timed beat */ }
   }
+  if (audioUri){
+    $.player.src = audioUri;
+    $.player.onended = () => setState('listening');
+    $.player.play().catch(()=>beat(line));
+  } else beat(line);                                       // no audio available — read-beat then listen
 }
+function beat(line){ setTimeout(()=>setState('listening'), Math.min(4500, 900 + line.length * 45)); }
 
 function sceneForApi(){ const s=S.scene; return {
   ai_character:s.ai_character, human_character:s.human_character,

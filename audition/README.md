@@ -68,6 +68,7 @@ cd audition/server && QWEN_API_KEY=sk-xxx s deploy
 - `GET  /health` — liveness + which models are wired
 - `GET  /warm`   — no-op that spins a cold instance up before an audition
 - `POST /costar` — `{ audio: dataURI, scene: {...}, history: [...] }` → `{ heard, line, note, stakes, audio }`
+- `POST /say`    — `{ text, voice? }` → `{ audio }` : voices arbitrary text (the opening line) so the whole scene is spoken
 
 ## Verified live (against the qwen-cloud intl Model Studio key)
 - ASR `qwen3-asr-flash`, reader `qwen-max`, and TTS **`qwen3-tts-flash`** all confirmed

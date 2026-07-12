@@ -10,6 +10,8 @@ server-side. Deploys independently of the director's cut-perceive function.
   POST /costar  -> { audio, scene, history? } -> the AI scene-partner's turn:
                    ASR the actor's line, generate the character's spoken reply
                    (qwen-max), voice it (qwen-tts). One HTTP round-trip = one beat.
+  POST /say     -> { text, voice? } -> { audio } : voice arbitrary text (the opening
+                   line), so the whole scene is spoken, not just the replies.
 
 WHY TURN-BASED HTTP (not a streaming WebSocket): a scale-to-zero FC function can't hold a
 persistent socket without breaking scale-to-zero. A scene partner delivers *lines* with
@@ -163,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path.rstrip("/")
-        if path != "/costar":
+        if path not in ("/costar", "/say"):
             return self._json(404, {"error": "not found"})
         if not API_KEY:
             return self._json(500, {"error": "QWEN_API_KEY not configured"})
@@ -172,11 +174,15 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n).decode() or "{}")
         except Exception as e:
             return self._json(400, {"error": f"bad request: {e}"})
-        if not req.get("audio"):
-            return self._json(400, {"error": "missing 'audio'"})
-        if not req.get("scene"):
-            return self._json(400, {"error": "missing 'scene'"})
         try:
+            if path == "/say":                             # voice arbitrary text (e.g. the opening line)
+                if not req.get("text"):
+                    return self._json(400, {"error": "missing 'text'"})
+                return self._json(200, {"audio": synthesize(req["text"], req.get("voice"))})
+            if not req.get("audio"):
+                return self._json(400, {"error": "missing 'audio'"})
+            if not req.get("scene"):
+                return self._json(400, {"error": "missing 'scene'"})
             return self._json(200, costar(req["scene"], req.get("history") or [], req["audio"]))
         except urllib.error.HTTPError as e:
             return self._json(502, {"error": "dashscope", "detail": e.read().decode()[:300]})
