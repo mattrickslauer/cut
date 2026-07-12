@@ -600,6 +600,34 @@ export class AuditionEngine {
     this.beginTake(false);
   }
 
+  // Roll a fresh take from the takes strip: begin a new one if we're mid-session, otherwise
+  // start recording again from idle (e.g. after a Stop, to add another take to the compare row).
+  recordAnother() {
+    if (this.state === "thinking") return;
+    if (this.stream && this.node) this.beginTake(false); // recording in progress → next take
+    else this.start(); // idle → spin the session back up
+  }
+
+  // Load an archived take into the main center player for review. Only when idle so it can't
+  // hijack an in-progress tape; swaps the live cam for the take's own retained blob URL.
+  playTake(url: string) {
+    if (this.state !== "idle") return;
+    this.cutPending();
+    try {
+      this.player.pause();
+    } catch {}
+    this.cam.style.display = "none";
+    this.playback.src = url;
+    this.playback.ontimeupdate = null;
+    this.patch({
+      camOff: false,
+      playbackVisible: true,
+      pillKind: "idle",
+      pillOverride: "▶ Reviewing take",
+    });
+    this.playback.play().catch(() => {});
+  }
+
   // ---- turn detection (energy-VAD on our own mic stream) ----
   private resetCapture() {
     this.buffer = [];
