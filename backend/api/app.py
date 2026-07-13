@@ -103,17 +103,25 @@ MALE_VOICE = os.environ.get("MALE_VOICE", "Ethan").strip() or "Ethan"
 FEMALE_VOICE = os.environ.get("FEMALE_VOICE", "Cherry").strip() or "Cherry"
 API_KEY = os.environ.get("QWEN_API_KEY", "").strip().strip('"').strip("'")
 
-# --- ElevenLabs TTS (natural English co-star voice) ------------------------------------------
-# qwen3-tts English voices read with a slight Chinese accent and a robotic edge; ElevenLabs is the
-# realistic-English alternative. When TTS_PROVIDER=elevenlabs AND a key is present, the co-star is
-# voiced by ElevenLabs (gender-matched: male/female voice id). Everything else stays on Qwen
-# (ASR, reply model, perception, image, avatar). Falls back to qwen3-tts if the key is missing.
-TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "elevenlabs").strip().lower()
+# --- Natural-English co-star voice: Cartesia (default) / ElevenLabs -----------------------------
+# qwen3-tts English voices read with a slight Chinese accent and a robotic edge. TTS_PROVIDER
+# selects a realistic-English provider for the CO-STAR VOICE ONLY — everything else stays on Qwen
+# (ASR, reply model, perception, image, avatar). The chosen provider is gender-matched (male/female
+# voice id); if its key is missing or a call errors, synthesize() degrades to qwen3-tts so a line
+# is never lost. A qwen scene-`voice` name is ignored on these paths — voice is picked by gender.
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia").strip().lower()  # 'cartesia' | 'elevenlabs' | 'qwen'
+
+# Cartesia (matches ai-intake-realtime: sonic-2). Key from Documents/AuthCodes/cartesia.key.
+CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "").strip().strip('"').strip("'")
+CARTESIA_MODEL = os.environ.get("CARTESIA_TTS_MODEL", "sonic-2").strip()
+CARTESIA_VERSION = os.environ.get("CARTESIA_VERSION", "2024-11-13").strip()
+CARTESIA_MALE_VOICE = os.environ.get("CARTESIA_MALE_VOICE", "65209f8e-6140-4a20-b819-3cc2e21da19b").strip()     # Nolan (m)
+CARTESIA_FEMALE_VOICE = os.environ.get("CARTESIA_FEMALE_VOICE", "2747b6cf-fa34-460c-97db-267566918881").strip()  # Allie (f)
+CARTESIA_TTS = "https://api.cartesia.ai/tts/bytes"
+
+# ElevenLabs (alternative provider). Defaults are stock ElevenLabs voices (Adam / Rachel).
 ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip().strip('"').strip("'")
 ELEVEN_MODEL = os.environ.get("ELEVEN_MODEL", "eleven_turbo_v2_5").strip()  # fast, natural; multilingual_v2 for max quality
-# Gender -> ElevenLabs voice id. Defaults are stock ElevenLabs voices (Adam / Rachel); override via
-# env to match ai-intake-realtime's chosen voices. A qwen scene-`voice` name is ignored here — with
-# ElevenLabs the voice is chosen purely by the co-star's gender.
 ELEVEN_MALE_VOICE = os.environ.get("ELEVEN_MALE_VOICE", "pNInz6obpgDQGcFmaJgB").strip()     # Adam (m)
 ELEVEN_FEMALE_VOICE = os.environ.get("ELEVEN_FEMALE_VOICE", "21m00Tcm4TlvDq8ikWAM").strip()  # Rachel (f)
 ELEVEN_TTS = "https://api.elevenlabs.io/v1/text-to-speech/"
@@ -381,6 +389,36 @@ def resolve_gender(gender=None, character=None, script=None):
     return None
 
 
+def _cartesia_tts(text, gender=None, character=None, script=None, emotion=None):
+    """Natural-English co-star voice via Cartesia (sonic-2). Voice is chosen purely by gender
+    (male/female voice id). Returns a base64 mp3 data URI."""
+    g = resolve_gender(gender, character, script)
+    voice_id = CARTESIA_MALE_VOICE if g == "male" else CARTESIA_FEMALE_VOICE  # default female when unknown
+    body = {
+        "model_id": CARTESIA_MODEL,
+        "transcript": text,
+        "voice": {"mode": "id", "id": voice_id},
+        "output_format": {"container": "mp3", "sample_rate": 44100, "bit_rate": 128000},
+        "language": "en",
+    }
+    req = urllib.request.Request(
+        CARTESIA_TTS, data=json.dumps(body).encode(),
+        headers={"X-API-Key": CARTESIA_API_KEY, "Cartesia-Version": CARTESIA_VERSION,
+                 "Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=45) as r:
+        raw = r.read()
+    return "data:audio/mpeg;base64," + base64.b64encode(raw).decode()
+
+
+def _external_tts(text, gender=None, character=None, script=None, emotion=None):
+    """Route to the selected natural-English provider, or None if none is active (→ qwen path)."""
+    if TTS_PROVIDER == "cartesia" and CARTESIA_API_KEY:
+        return _cartesia_tts(text, gender=gender, character=character, script=script, emotion=emotion)
+    if TTS_PROVIDER == "elevenlabs" and ELEVEN_API_KEY:
+        return _eleven_tts(text, gender=gender, character=character, script=script, emotion=emotion)
+    return None
+
+
 def _eleven_tts(text, gender=None, character=None, script=None, emotion=None):
     """Natural-English co-star voice via ElevenLabs. Voice is chosen purely by gender (male/female
     voice id); a qwen scene-voice name doesn't apply here. Returns a base64 mp3 data URI. Strong
@@ -416,12 +454,14 @@ def synthesize(text, voice=None, emotion=None, instruction=None, tone=None,
     If that model 4xx's (unavailable / bad param), fall back to plain qwen3-tts-flash so a line
     is never lost to a style hiccup.
 
-    Provider: when TTS_PROVIDER=elevenlabs and a key is set, the co-star is voiced by ElevenLabs
-    (natural English, gender-matched). Any ElevenLabs error degrades to the qwen path below so a
+    Provider: when TTS_PROVIDER selects a natural-English provider (cartesia/elevenlabs) with a key,
+    the co-star is voiced there (gender-matched). Any error degrades to the qwen path below so a
     line is never lost."""
-    if TTS_PROVIDER == "elevenlabs" and ELEVEN_API_KEY:
+    if TTS_PROVIDER in ("cartesia", "elevenlabs"):
         try:
-            return _eleven_tts(text, gender=gender, character=character, script=script, emotion=emotion)
+            out = _external_tts(text, gender=gender, character=character, script=script, emotion=emotion)
+            if out:
+                return out
         except Exception:
             pass  # fall through to qwen3-tts so the line still gets voiced
     voice = resolve_voice(voice, gender, character, script)  # gender-match when no voice is pinned
@@ -762,9 +802,10 @@ class Handler(BaseHTTPRequestHandler):
                                     "tts_instruct_model": TTS_INSTRUCT_MODEL,
                                     "expressive": TTS_EXPRESSIVE, "has_key": bool(API_KEY),
                                     "tts_provider": TTS_PROVIDER,
+                                    "cartesia_active": TTS_PROVIDER == "cartesia" and bool(CARTESIA_API_KEY),
+                                    "cartesia_model": CARTESIA_MODEL,
+                                    "cartesia_male_voice": CARTESIA_MALE_VOICE, "cartesia_female_voice": CARTESIA_FEMALE_VOICE,
                                     "eleven_active": TTS_PROVIDER == "elevenlabs" and bool(ELEVEN_API_KEY),
-                                    "eleven_model": ELEVEN_MODEL,
-                                    "eleven_male_voice": ELEVEN_MALE_VOICE, "eleven_female_voice": ELEVEN_FEMALE_VOICE,
                                     "male_voice": MALE_VOICE, "female_voice": FEMALE_VOICE,
                                     "avatar_model": AVATAR_MODEL, "oss": oss_enabled(),
                                     "perception_model": PERCEPTION_MODEL, "image_model": IMAGE_MODEL})
