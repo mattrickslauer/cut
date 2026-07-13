@@ -34,7 +34,13 @@ resources:
         TTS_MODEL: qwen3-tts-flash             # fast natural voice (default path)
         TTS_INSTRUCT_MODEL: qwen3-tts-instruct-flash  # expressive: reads a delivery `instructions` string
         # TTS_EXPRESSIVE: "1"                  # set "0" to force the flat flash voice
-        TTS_VOICE: Cherry                      # default; each scene overrides per character
+        TTS_VOICE: Cherry                      # default; each scene overrides per character (qwen path)
+        # ---- co-star voice provider: ElevenLabs for natural English (qwen3-tts sounds accented) ----
+        TTS_PROVIDER: elevenlabs               # 'elevenlabs' (needs key below) or 'qwen'
+        ELEVENLABS_API_KEY: ${env('ELEVENLABS_API_KEY', '')}  # injected from .env at deploy; never committed
+        ELEVEN_MODEL: eleven_turbo_v2_5        # fast+natural; eleven_multilingual_v2 for max quality
+        ELEVEN_MALE_VOICE: ${env('ELEVEN_MALE_VOICE', 'pNInz6obpgDQGcFmaJgB')}      # default Adam (m)
+        ELEVEN_FEMALE_VOICE: ${env('ELEVEN_FEMALE_VOICE', '21m00Tcm4TlvDq8ikWAM')}  # default Rachel (f)
         PORTRAIT_MODEL: qwen-image             # co-star's face (/portrait)
         # ---- talking-head "compile" (optional; only needed for the video co-star) ----
         AVATAR_MODEL: wan2.7-i2v-2026-04-25    # audio-driven lip-synced video (/avatar), intl endpoint
