@@ -103,6 +103,29 @@ MALE_VOICE = os.environ.get("MALE_VOICE", "Ethan").strip() or "Ethan"
 FEMALE_VOICE = os.environ.get("FEMALE_VOICE", "Cherry").strip() or "Cherry"
 API_KEY = os.environ.get("QWEN_API_KEY", "").strip().strip('"').strip("'")
 
+# --- Natural-English co-star voice: Cartesia (default) / ElevenLabs -----------------------------
+# qwen3-tts English voices read with a slight Chinese accent and a robotic edge. TTS_PROVIDER
+# selects a realistic-English provider for the CO-STAR VOICE ONLY — everything else stays on Qwen
+# (ASR, reply model, perception, image, avatar). The chosen provider is gender-matched (male/female
+# voice id); if its key is missing or a call errors, synthesize() degrades to qwen3-tts so a line
+# is never lost. A qwen scene-`voice` name is ignored on these paths — voice is picked by gender.
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia").strip().lower()  # 'cartesia' | 'elevenlabs' | 'qwen'
+
+# Cartesia (matches ai-intake-realtime: sonic-2). Key from Documents/AuthCodes/cartesia.key.
+CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "").strip().strip('"').strip("'")
+CARTESIA_MODEL = os.environ.get("CARTESIA_TTS_MODEL", "sonic-2").strip()
+CARTESIA_VERSION = os.environ.get("CARTESIA_VERSION", "2024-11-13").strip()
+CARTESIA_MALE_VOICE = os.environ.get("CARTESIA_MALE_VOICE", "65209f8e-6140-4a20-b819-3cc2e21da19b").strip()     # Nolan (m)
+CARTESIA_FEMALE_VOICE = os.environ.get("CARTESIA_FEMALE_VOICE", "2747b6cf-fa34-460c-97db-267566918881").strip()  # Allie (f)
+CARTESIA_TTS = "https://api.cartesia.ai/tts/bytes"
+
+# ElevenLabs (alternative provider). Defaults are stock ElevenLabs voices (Adam / Rachel).
+ELEVEN_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip().strip('"').strip("'")
+ELEVEN_MODEL = os.environ.get("ELEVEN_MODEL", "eleven_turbo_v2_5").strip()  # fast, natural; multilingual_v2 for max quality
+ELEVEN_MALE_VOICE = os.environ.get("ELEVEN_MALE_VOICE", "pNInz6obpgDQGcFmaJgB").strip()     # Adam (m)
+ELEVEN_FEMALE_VOICE = os.environ.get("ELEVEN_FEMALE_VOICE", "21m00Tcm4TlvDq8ikWAM").strip()  # Rachel (f)
+ELEVEN_TTS = "https://api.elevenlabs.io/v1/text-to-speech/"
+
 # Alibaba OSS — where a co-star line's TTS WAV is hosted so wan2.7-i2v can fetch it (it requires a
 # public url for driving_audio; base64 isn't accepted). We PUT the bytes then hand out a presigned
 # GET url, so it works whether or not the bucket allows public-read. Stdlib OSS V1 signing.
@@ -354,6 +377,72 @@ def resolve_voice(voice=None, gender=None, character=None, script=None):
     return TTS_VOICE
 
 
+def resolve_gender(gender=None, character=None, script=None):
+    """'male' | 'female' | None from an explicit gender, else inferred from the character/script."""
+    g = (gender or "").strip().lower()
+    if g in ("male", "m", "man"):
+        return "male"
+    if g in ("female", "f", "woman"):
+        return "female"
+    if character:
+        return infer_gender(character, script)
+    return None
+
+
+def _cartesia_tts(text, gender=None, character=None, script=None, emotion=None):
+    """Natural-English co-star voice via Cartesia (sonic-2). Voice is chosen purely by gender
+    (male/female voice id). Returns a base64 mp3 data URI."""
+    g = resolve_gender(gender, character, script)
+    voice_id = CARTESIA_MALE_VOICE if g == "male" else CARTESIA_FEMALE_VOICE  # default female when unknown
+    body = {
+        "model_id": CARTESIA_MODEL,
+        "transcript": text,
+        "voice": {"mode": "id", "id": voice_id},
+        "output_format": {"container": "mp3", "sample_rate": 44100, "bit_rate": 128000},
+        "language": "en",
+    }
+    req = urllib.request.Request(
+        CARTESIA_TTS, data=json.dumps(body).encode(),
+        headers={"X-API-Key": CARTESIA_API_KEY, "Cartesia-Version": CARTESIA_VERSION,
+                 "Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=45) as r:
+        raw = r.read()
+    return "data:audio/mpeg;base64," + base64.b64encode(raw).decode()
+
+
+def _external_tts(text, gender=None, character=None, script=None, emotion=None):
+    """Route to the selected natural-English provider, or None if none is active (→ qwen path)."""
+    if TTS_PROVIDER == "cartesia" and CARTESIA_API_KEY:
+        return _cartesia_tts(text, gender=gender, character=character, script=script, emotion=emotion)
+    if TTS_PROVIDER == "elevenlabs" and ELEVEN_API_KEY:
+        return _eleven_tts(text, gender=gender, character=character, script=script, emotion=emotion)
+    return None
+
+
+def _eleven_tts(text, gender=None, character=None, script=None, emotion=None):
+    """Natural-English co-star voice via ElevenLabs. Voice is chosen purely by gender (male/female
+    voice id); a qwen scene-voice name doesn't apply here. Returns a base64 mp3 data URI. Strong
+    beats loosen stability/raise style so delivery can carry more emotion."""
+    g = resolve_gender(gender, character, script)
+    voice_id = ELEVEN_MALE_VOICE if g == "male" else ELEVEN_FEMALE_VOICE  # default female when unknown
+    strong = (emotion or "").strip().lower() in STRONG_EMOTIONS
+    settings = {
+        "stability": 0.35 if strong else 0.5,      # lower = more expressive/variable
+        "similarity_boost": 0.8,
+        "style": 0.5 if strong else 0.3,
+        "use_speaker_boost": True,
+    }
+    body = {"text": text, "model_id": ELEVEN_MODEL, "voice_settings": settings}
+    req = urllib.request.Request(
+        ELEVEN_TTS + voice_id + "?output_format=mp3_44100_128",
+        data=json.dumps(body).encode(),
+        headers={"xi-api-key": ELEVEN_API_KEY, "Content-Type": "application/json", "Accept": "audio/mpeg"},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=45) as r:
+        raw, ctype = r.read(), r.headers.get("Content-Type", "audio/mpeg")
+    return "data:%s;base64,%s" % (ctype, base64.b64encode(raw).decode())
+
+
 def synthesize(text, voice=None, emotion=None, instruction=None, tone=None,
                gender=None, character=None, script=None):
     """Voice a line, in character. Returns a same-origin 'data:audio/...;base64,...' URI — we
@@ -363,7 +452,18 @@ def synthesize(text, voice=None, emotion=None, instruction=None, tone=None,
     Expressive path: when a delivery cue exists (an explicit `instruction`, or an `emotion`
     label we translate into one) and TTS_EXPRESSIVE is on, voice it with the instruct model.
     If that model 4xx's (unavailable / bad param), fall back to plain qwen3-tts-flash so a line
-    is never lost to a style hiccup."""
+    is never lost to a style hiccup.
+
+    Provider: when TTS_PROVIDER selects a natural-English provider (cartesia/elevenlabs) with a key,
+    the co-star is voiced there (gender-matched). Any error degrades to the qwen path below so a
+    line is never lost."""
+    if TTS_PROVIDER in ("cartesia", "elevenlabs"):
+        try:
+            out = _external_tts(text, gender=gender, character=character, script=script, emotion=emotion)
+            if out:
+                return out
+        except Exception:
+            pass  # fall through to qwen3-tts so the line still gets voiced
     voice = resolve_voice(voice, gender, character, script)  # gender-match when no voice is pinned
     direction = instruction or (emotion_to_instruction(emotion, tone) if TTS_EXPRESSIVE else None)
     if direction and _INSTRUCT_OK[0]:
@@ -701,6 +801,11 @@ class Handler(BaseHTTPRequestHandler):
                                     "costar_model": COSTAR_MODEL, "tts_model": TTS_MODEL,
                                     "tts_instruct_model": TTS_INSTRUCT_MODEL,
                                     "expressive": TTS_EXPRESSIVE, "has_key": bool(API_KEY),
+                                    "tts_provider": TTS_PROVIDER,
+                                    "cartesia_active": TTS_PROVIDER == "cartesia" and bool(CARTESIA_API_KEY),
+                                    "cartesia_model": CARTESIA_MODEL,
+                                    "cartesia_male_voice": CARTESIA_MALE_VOICE, "cartesia_female_voice": CARTESIA_FEMALE_VOICE,
+                                    "eleven_active": TTS_PROVIDER == "elevenlabs" and bool(ELEVEN_API_KEY),
                                     "male_voice": MALE_VOICE, "female_voice": FEMALE_VOICE,
                                     "avatar_model": AVATAR_MODEL, "oss": oss_enabled(),
                                     "perception_model": PERCEPTION_MODEL, "image_model": IMAGE_MODEL})

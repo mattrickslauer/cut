@@ -34,7 +34,15 @@ resources:
         TTS_MODEL: qwen3-tts-flash             # fast natural voice (default path)
         TTS_INSTRUCT_MODEL: qwen3-tts-instruct-flash  # expressive: reads a delivery `instructions` string
         # TTS_EXPRESSIVE: "1"                  # set "0" to force the flat flash voice
-        TTS_VOICE: Cherry                      # default; each scene overrides per character
+        TTS_VOICE: Cherry                      # default; each scene overrides per character (qwen path)
+        # ---- co-star voice provider: Cartesia for natural English (qwen3-tts sounds accented) ----
+        TTS_PROVIDER: cartesia                 # 'cartesia' (needs key below) | 'elevenlabs' | 'qwen'
+        CARTESIA_API_KEY: ${env('CARTESIA_API_KEY', '')}  # injected from .env at deploy; never committed
+        CARTESIA_TTS_MODEL: sonic-2            # matches ai-intake-realtime
+        CARTESIA_MALE_VOICE: ${env('CARTESIA_MALE_VOICE', '65209f8e-6140-4a20-b819-3cc2e21da19b')}      # Nolan (m)
+        CARTESIA_FEMALE_VOICE: ${env('CARTESIA_FEMALE_VOICE', '2747b6cf-fa34-460c-97db-267566918881')}  # Allie (f)
+        # ElevenLabs alternative (set TTS_PROVIDER=elevenlabs + key to use):
+        ELEVENLABS_API_KEY: ${env('ELEVENLABS_API_KEY', '')}
         PORTRAIT_MODEL: qwen-image             # co-star's face (/portrait)
         # ---- talking-head "compile" (optional; only needed for the video co-star) ----
         AVATAR_MODEL: wan2.7-i2v-2026-04-25    # audio-driven lip-synced video (/avatar), intl endpoint
